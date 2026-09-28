@@ -178,22 +178,7 @@ function createVirtualGrid(container, opts = {}) {
     if (!ticking) { requestAnimationFrame(render); ticking = true; }
   }
 
-function initCacheListeners() {
-  window.api.onCacheStarted((d) => { upsertActiveCache(d); renderCachedDownloads(); });
-  window.api.onCacheProgress((d) => {
-    if (d.cacheId && state.activeCaches.some(a => a.cacheId === d.cacheId)) {
-      upsertActiveCache(d);
-      updateActiveCacheItem(d.cacheId, d.percent || 0, d.received || 0);
-    }
-  });
-  window.api.onCacheDone((d) => {
-    state.activeCaches = state.activeCaches.filter(a => a.cacheId !== d.cacheId);
-    if (d && d.success) loadCachedDownloads();
-    else renderCachedDownloads();
-  });
-}
-
-function init() {
+  function init() {
     container.innerHTML = '';
     container.style.overflowY = 'auto';
     container.style.position = 'relative';
@@ -1888,6 +1873,21 @@ function renderDownloads() {
   renderActiveDownloads();
   renderCompletedDownloads();
   renderCachedDownloads();
+}
+
+function initCacheListeners() {
+  window.api.onCacheStarted((d) => { upsertActiveCache(d); renderCachedDownloads(); });
+  window.api.onCacheProgress((d) => {
+    if (d.cacheId && state.activeCaches.some(a => a.cacheId === d.cacheId)) {
+      upsertActiveCache(d);
+      updateActiveCacheItem(d.cacheId, d.percent || 0, d.received || 0);
+    }
+  });
+  window.api.onCacheDone((d) => {
+    state.activeCaches = state.activeCaches.filter(a => a.cacheId !== d.cacheId);
+    if (d && d.success) loadCachedDownloads();
+    else renderCachedDownloads();
+  });
 }
 
 function initDownloadListeners() {

@@ -19,6 +19,17 @@ let mainWindow;
 let downloadIdCounter = 0;
 let localMediaPort = 0;
 const activeDownloads = new Map(); // downloadId -> { stream, writer, paused, filePath, received, total }
+const activeCaches = new Map();    // cacheId -> { url, title, filename, filePath, controller, stream, received, total, percent }
+
+function getCacheDir() {
+  const dir = path.join(app.getPath('userData'), 'cache', 'videos');
+  if (!getFs().existsSync(dir)) getFs().mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function sendToRenderer(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+}
 const MIME_TYPES = {
   '.ts':  'video/mp2t',
   '.mp4': 'video/mp4',
@@ -202,8 +213,29 @@ ipcMain.on('open-external', (event, url) => {
 ipcMain.handle('play-local-file', async (event, filePath) => {
   if (filePath && typeof filePath === 'string' && localMediaPort > 0) {
     const downloadsDir = path.join(app.getPath('downloads'), 'Void Streamer');
-    // Compute relative path from downloads dir, then build local server URL
-    const relPath = path.relative(downloadsDir, filePath);
+    // Cached files live in the app's cache dir; saved files live in Downloads.
+    // The local media server only serves the downloads dir, so anything else
+    // (i.e. the cache) has to be copied over there first.
+    let target = filePath;
+    const inDownloads = (() => {
+      const rel = path.relative(downloadsDir, target);
+      return !rel.startsWith('..') && !path.isAbsolute(rel);
+    })();
+    if (!inDownloads) {
+      const cacheDir = getCacheDir();
+      const rel = path.relative(cacheDir, target);
+      if (rel.startsWith('..') || path.isAbsolute(rel)) {
+        return { success: false, error: 'Cannot play file' };
+      }
+      if (!getFs().existsSync(downloadsDir)) getFs().mkdirSync(downloadsDir, { recursive: true });
+      target = path.join(downloadsDir, path.basename(target));
+      try {
+        if (!getFs().existsSync(target)) getFs().copyFileSync(filePath, target);
+      } catch (e) {
+        return { success: false, error: e.message };
+      }
+    }
+    const relPath = path.relative(downloadsDir, target);
     if (!relPath.startsWith('..') && !path.isAbsolute(relPath)) {
       const url = `http://127.0.0.1:${localMediaPort}/${encodeURIComponent(relPath)}`;
       return { success: true, url };
@@ -233,6 +265,8 @@ ipcMain.handle('scrape-spa', async (event, { url, jsCode }) => {
       tryResolve({ success: false, error: 'Timed out waiting for SPA page to render', items: [] });
     }, 30000);
 
+    // Wait for the SPA to finish loading, then run the extraction code in the page
+    win.webContents.on('did-finish-load', async () => {
       if (resolved) return;
 
       try {
@@ -267,7 +301,7 @@ ipcMain.handle('scrape-spa', async (event, { url, jsCode }) => {
     );
     win.loadURL(url);
   });
-
+});
 
 // IPC: Scrape MoviBox stream URL via hidden browser window
 // This intercepts the actual video stream network request that JS triggers after page load
@@ -894,13 +928,12 @@ ipcMain.handle('download-cancel', async (event, { downloadId }) => {
 });
 
 // IPC: Cache a video to temp for smoother playback
-ipcMain.handle('cache-video', async (event, { url, title }) => {
+ipcMain.handle('cache-video', async (event, { url, title, cacheId }) => {
   if (!url) return { success: false, error: 'No URL' };
   const isHls = url.includes('.m3u8') || (url.includes('.txt') && !url.includes('.srt') && !url.includes('.vtt'));
   if (isHls) return { success: false, error: 'HLS not cacheable as single file' };
 
-  const cacheDir = path.join(app.getPath('userData'), 'cache', 'videos');
-  if (!getFs().existsSync(cacheDir)) getFs().mkdirSync(cacheDir, { recursive: true });
+  const cacheDir = getCacheDir();
 
   const urlExt = path.extname(url.split('?')[0].split('#')[0]) || '.mp4';
   const safeName = (title || 'video').replace(/[<>:"/\\|?*]/g, '_') + urlExt;
@@ -910,41 +943,177 @@ ipcMain.handle('cache-video', async (event, { url, title }) => {
     try { getFs().unlinkSync(filePath); } catch {}
   }
 
+  const id = cacheId || `cache_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const controller = new AbortController();
+  const job = {
+    cacheId: id, url, title: title || '', filename: safeName, filePath,
+    controller, stream: null, received: 0, total: 0, percent: 0, cancelled: false
+  };
+  activeCaches.set(id, job);
+  sendToRenderer('cache-started', { cacheId: id, title: job.title, filename: safeName });
+
+  const finish = (result) => {
+    activeCaches.delete(id);
+    sendToRenderer('cache-done', { cacheId: id, ...result });
+    return result;
+  };
+
   try {
     const response = await getAxios()({
-      url, responseType: 'stream', timeout: 120000,
+      url, responseType: 'stream', timeout: 120000, signal: controller.signal,
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
     });
 
-    const total = parseInt(response.headers['content-length'] || '0', 10);
-    let received = 0;
+    job.total = parseInt(response.headers['content-length'] || '0', 10);
+    job.received = 0;
     const writer = getFs().createWriteStream(filePath);
+    job.stream = response.data;
 
-    return new Promise((resolve, reject) => {
+    return await new Promise((resolve) => {
+      const abort = (reason) => {
+        try { response.data.destroy(); } catch {}
+        try { writer.destroy(); } catch {}
+        try { if (getFs().existsSync(filePath)) getFs().unlinkSync(filePath); } catch {}
+        resolve(finish({ success: false, error: reason, cancelled: !!job.cancelled }));
+      };
+
       response.data.on('data', (chunk) => {
-        received += chunk.length;
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('cache-progress', {
-            received, total, percent: total ? Math.round((received / total) * 100) : 0
-          });
-        }
+        job.received += chunk.length;
+        job.percent = job.total ? Math.round((job.received / job.total) * 100) : 0;
+        sendToRenderer('cache-progress', {
+          cacheId: id, received: job.received, total: job.total, percent: job.percent
+        });
       });
       response.data.pipe(writer);
-      writer.on('finish', () => resolve({ success: true, path: filePath }));
-      writer.on('error', (err) => {
-        try { getFs().unlinkSync(filePath); } catch {}
-        reject(err);
-      });
-      response.data.on('error', () => {
-        try { getFs().unlinkSync(filePath); } catch {}
-        reject(new Error('Stream error'));
-      });
+      writer.on('finish', () => resolve(finish({ success: true, path: filePath })));
+      writer.on('error', (err) => abort(err.message || 'Write error'));
+      response.data.on('error', (err) => abort(err.message || 'Stream error'));
+      controller.signal.addEventListener('abort', () => abort('Cache cancelled'));
     });
   } catch (e) {
-    try { getFs().unlinkSync(filePath); } catch {}
+    try { if (getFs().existsSync(filePath)) getFs().unlinkSync(filePath); } catch {}
+    return finish({
+      success: false,
+      error: job.cancelled ? 'Cache cancelled' : (e.message || 'Cache failed')
+    });
+  }
+});
+
+// IPC: List files currently sitting in the cache directory
+ipcMain.handle('list-cache', async () => {
+  try {
+    const cacheDir = getCacheDir();
+    const items = getFs().readdirSync(cacheDir)
+      .filter(name => !name.startsWith('.'))
+      .map(name => {
+        const full = path.join(cacheDir, name);
+        const stat = getFs().statSync(full, { throwIfNoEntry: false });
+        if (!stat || !stat.isFile()) return null;
+        return { name, path: full, size: stat.size, modified: stat.mtimeMs };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.modified - a.modified);
+    return { success: true, items };
+  } catch (e) {
+    return { success: false, error: e.message, items: [] };
+  }
+});
+
+// IPC: List in-flight cache jobs so the UI can restore progress after a reload
+ipcMain.handle('list-active-caches', async () => {
+  const caches = [];
+  for (const job of activeCaches.values()) {
+    caches.push({
+      cacheId: job.cacheId, title: job.title, filename: job.filename,
+      received: job.received, total: job.total, percent: job.percent
+    });
+  }
+  return { success: true, caches };
+});
+
+// IPC: Cancel an in-flight cache job
+ipcMain.handle('cancel-cache', async (event, { cacheId }) => {
+  const job = activeCaches.get(cacheId);
+  if (!job) return { success: false, error: 'No such cache job' };
+  job.cancelled = true;
+  try { job.controller.abort(); } catch {}
+  return { success: true };
+});
+
+// IPC: Copy a cached file into Downloads/Void Streamer so it persists
+ipcMain.handle('save-cache', async (event, { cachePath }) => {
+  try {
+    if (!cachePath || typeof cachePath !== 'string') return { success: false, error: 'Invalid path' };
+    // Security: only allow saving files that live in the cache directory
+    const cacheDir = getCacheDir();
+    if (path.dirname(path.resolve(cachePath)) !== cacheDir) {
+      return { success: false, error: 'File is not in the cache directory' };
+    }
+    if (!getFs().existsSync(cachePath)) return { success: false, error: 'Cached file no longer exists' };
+
+    const downloadsDir = path.join(app.getPath('downloads'), 'Void Streamer');
+    if (!getFs().existsSync(downloadsDir)) getFs().mkdirSync(downloadsDir, { recursive: true });
+
+    const filename = path.basename(cachePath);
+    let dest = path.join(downloadsDir, filename);
+    let n = 1;
+    while (getFs().existsSync(dest)) {
+      const ext = path.extname(filename);
+      dest = path.join(downloadsDir, `${path.basename(filename, ext)} (${n++})${ext}`);
+    }
+    getFs().copyFileSync(cachePath, dest);
+    return { success: true, path: dest, filename: path.basename(dest) };
+  } catch (e) {
     return { success: false, error: e.message };
   }
 });
+
+// IPC: Delete a cached file
+ipcMain.handle('delete-cache', async (event, { cachePath }) => {
+  try {
+    if (!cachePath || typeof cachePath !== 'string') return { success: false, error: 'Invalid path' };
+    // Security: only allow deleting files that live in the cache directory
+    const cacheDir = getCacheDir();
+    if (path.dirname(path.resolve(cachePath)) !== cacheDir) {
+      return { success: false, error: 'File is not in the cache directory' };
+    }
+    if (getFs().existsSync(cachePath)) getFs().unlinkSync(cachePath);
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+// IPC: Read a text file from the app's data directory (config/state files)
+ipcMain.handle('read-file', async (event, { filePath }) => {
+  try {
+    if (!filePath || typeof filePath !== 'string') return { success: false, error: 'Invalid path' };
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(app.getPath('userData') + path.sep)) {
+      return { success: false, error: 'Path outside app data directory' };
+    }
+    return { success: true, data: getFs().readFileSync(resolved, 'utf8') };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+// IPC: Write a text file into the app's data directory
+ipcMain.handle('write-file', async (event, { filePath, data }) => {
+  try {
+    if (!filePath || typeof filePath !== 'string') return { success: false, error: 'Invalid path' };
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(app.getPath('userData') + path.sep)) {
+      return { success: false, error: 'Path outside app data directory' };
+    }
+    getFs().mkdirSync(path.dirname(resolved), { recursive: true });
+    getFs().writeFileSync(resolved, data ?? '', 'utf8');
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
 
 // IPC: Scrape KawaiiAnime video URL from watch page
 ipcMain.handle('scrape-kawaii-anime-video', async (event, { url }) => {
