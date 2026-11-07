@@ -1,0 +1,37 @@
+#!/bin/sh
+# Void Streamer (Android) — Gradle runner.
+# Uses the cached Gradle 8.4 distribution and the Zulu 21 JDK from this
+# machine if installed, otherwise falls back to any gradle on PATH.
+export JAVA_HOME="${JAVA_HOME:-/home/nightmare/.gradle/jdks/azul_systems__inc_-21-amd64-linux.2}"
+if [ -x "$JAVA_HOME/bin/java" ]; then
+  : # use it
+elif command -v java >/dev/null 2>&1; then
+  JAVA_HOME=""
+elif [ -x "$HOME/android-studio/jbr/bin/java" ]; then
+  export JAVA_HOME="$HOME/android-studio/jbr"
+fi
+
+GRADLE_BIN=""
+# Cached Gradle distributions (Android Studio installs)
+for candidate in \
+  "$HOME/.gradle/wrapper/dists/gradle-8.4-bin/1w5dpkrfk8irigvoxmyhowfim/gradle-8.4/bin/gradle" \
+  "$HOME/.gradle/wrapper/dists"/*/gradle-*/bin/gradle; do
+  if [ -x "$candidate" ]; then GRADLE_BIN="$candidate"; break; fi
+done
+
+if [ -z "$GRADLE_BIN" ]; then
+  if command -v gradle >/dev/null 2>&1; then
+    exec gradle "$@"
+  fi
+  echo "Gradle not found. Install Gradle (or open this project in Android Studio," >&2
+  echo "which will set up the toolchain automatically)." >&2
+  exit 1
+fi
+
+# Convert a single local wrapper jar if present in the project
+WRAPPER_JAR="$(pwd)/gradle/wrapper/gradle-wrapper.jar"
+if [ -f "$WRAPPER_JAR" ] && [ "${USE_WRAPPER_JAR:-0}" = "1" ]; then
+  exec "$JAVA_HOME/bin/java" -jar "$WRAPPER_JAR" "$@"
+fi
+
+exec "$GRADLE_BIN" "$@"

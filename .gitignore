@@ -1,2 +1,7 @@
 node_modules/
 apk/
+# Android build outputs / local machine config (do not commit)
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties

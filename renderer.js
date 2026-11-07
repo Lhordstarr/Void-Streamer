@@ -8,35 +8,13 @@ const DEFAULT_SOURCES = [
     latestUrl: 'https://moviepire.org/', searchUrl: 'https://moviepire.org/search?q={query}'
   },
   {
-    name: 'LunaStream', active: true, baseUrl: 'https://lunastream.watch',
-    latestUrl: 'https://lunastream.watch/', searchUrl: 'https://lunastream.watch/search?q={query}'
-  },
-  {
-    name: 'DuloTV', active: true, baseUrl: 'https://dulo.tv',
-    latestUrl: 'https://dulo.tv/', searchUrl: 'https://dulo.tv/search?q={query}'
-  },
-  {
-    name: 'LordFlix', active: true, baseUrl: 'https://lordflix.org',
-    latestUrl: 'https://lordflix.org/', searchUrl: 'https://lordflix.org/search?q={query}'
-  },
-  {
     name: 'KawaiiAnime', active: true, baseUrl: 'https://kawaii-anime.com',
     latestUrl: 'https://kawaii-anime.com/browse', searchUrl: 'https://kawaii-anime.com/search?q={query}',
     isKawaiiAnime: true
   },
   {
-    name: 'LunaAnime', active: true, baseUrl: 'https://luna-stream.me',
-    latestUrl: 'https://luna-stream.me', searchUrl: 'https://luna-stream.me/?q={query}',
-    isAnimeSource: true
-  },
-  {
     name: 'AnimeX', active: true, baseUrl: 'https://animex.one',
     latestUrl: 'https://animex.one', searchUrl: 'https://animex.one/?q={query}',
-    isAnimeSource: true
-  },
-  {
-    name: 'AniLight', active: true, baseUrl: 'https://anilight.live',
-    latestUrl: 'https://anilight.live', searchUrl: 'https://anilight.live/?q={query}',
     isAnimeSource: true
   },
   {
@@ -53,16 +31,16 @@ const DEFAULT_SOURCES = [
     latestUrl: 'https://7reels.cc/', searchUrl: 'https://7reels.cc/search?q={query}'
   },
   {
-    name: 'YouFlex', active: true, baseUrl: 'https://youflex.top',
-    latestUrl: 'https://youflex.top/search?type=movie', searchUrl: 'https://youflex.top/search?q={query}'
+    name: 'Abibli', active: true, baseUrl: 'https://abibli.com',
+    latestUrl: 'https://abibli.com/', searchUrl: 'https://abibli.com/search?q={query}'
   },
   {
-    name: 'Screenscape', active: true, baseUrl: 'https://screenscape.me',
-    latestUrl: 'https://screenscape.me/', searchUrl: 'https://screenscape.me/search?q={query}'
+    name: 'PeeStream', active: true, baseUrl: 'https://peestream.in',
+    latestUrl: 'https://peestream.in/', searchUrl: 'https://peestream.in/search/{query}'
   },
 ];
 
-const STREAM_EMBEDS = ['play.xpass.top', 'vidcore.net', 'vsembed.ru', 'player.videasy.net', 'zxcstream.xyz', 'vidplays.fun', 'player.vidplus.to', 'vidlink.pro', 'vidsrc.mov', 'vidrock.net', 'vidnest.fun', 'vidup.to', 'player.vidify.top', 'player.vidzee.wtf', 'strigil.cc', 'rivestream.app', '7reels.cc', 'youflex.top', 'screenscape.me'];
+const STREAM_EMBEDS = ['play.xpass.top', 'vidcore.net', 'vidlink.pro', 'vidfast.vc', 'rivestream.app', '7reels.cc'];
 const STORAGE_KEYS = { sources: 'vs_sources', downloads: 'vs_downloads', cacheEnabled: 'vs_cache_enabled' };
 
 let _ffmpegInstance = null;
@@ -95,6 +73,33 @@ async function remuxTsToMp4(tsData, onProgress) {
   _ffmpegInstance.FS('unlink', 'input.ts');
   _ffmpegInstance.FS('unlink', 'output.mp4');
   return new Blob([data.buffer], { type: 'video/mp4' });
+}
+
+// Mux separate fragmented-MP4 video and audio tracks into one MP4.
+async function muxAvToMp4(videoData, audioData) {
+  const { createFFmpeg } = FFmpeg;
+  if (!_ffmpegInstance) {
+    _ffmpegInstance = createFFmpeg({ log: false });
+    await _ffmpegInstance.load();
+  }
+  _ffmpegInstance.FS('writeFile', 'video.mp4', videoData);
+  _ffmpegInstance.FS('writeFile', 'audio.mp4', audioData);
+  try {
+    await _ffmpegInstance.run(
+      '-fflags', '+genpts',
+      '-i', 'video.mp4',
+      '-i', 'audio.mp4',
+      '-map', '0:v:0', '-map', '1:a:0',
+      '-c', 'copy', '-movflags', '+faststart',
+      'output.mp4'
+    );
+    const data = _ffmpegInstance.FS('readFile', 'output.mp4');
+    return new Blob([data.buffer], { type: 'video/mp4' });
+  } finally {
+    for (const f of ['video.mp4', 'audio.mp4', 'output.mp4']) {
+      try { _ffmpegInstance.FS('unlink', f); } catch {}
+    }
+  }
 }
 
 // ── Virtual Scroll Engine ──────────────────────────────────────────────────────
@@ -252,7 +257,14 @@ function deduplicateItems(items) {
   return Array.from(map.values());
 }
 
-const DEAD_SOURCES = ['overlook.to', 'themoviebox.xyz', 'moviebox']; // removed/defunct sources
+// Removed/defunct sources — also used to purge stale entries from localStorage.
+const DEAD_SOURCES = [
+  'overlook.to', 'themoviebox.xyz', 'moviebox',
+  'LunaStream', 'lunastream.watch', 'DuloTV', 'dulo.tv',
+  'LordFlix', 'lordflix.org', 'LunaAnime', 'luna-stream.me',
+  'YouFlex', 'youflex.top', 'Screenscape', 'screenscape.me',
+  'AniLight', 'anilight.live'
+];
 function loadSources() {
   try {
     const s = localStorage.getItem(STORAGE_KEYS.sources);
@@ -294,10 +306,12 @@ function saveCacheEnabled() {
 function hideSuggestions() { const b = $('#search-suggestions'); if (b) b.classList.add('hidden'); }
 
 function formatQualityLabel(item) {
-  const raw = item.label || item.resolution || '';
-  const m = raw.match(/(\d+)x(\d+)/);
+  const raw = String(item.label || item.resolution || '').trim();
+  if (!raw) return 'Auto';
+  const m = raw.match(/(\d+)x(\d+)/);       // "1920x1080" -> "1080p"
   if (m) return m[2] + 'p';
-  return raw || 'Auto';
+  if (/^\d{3,4}$/.test(raw)) return raw + 'p'; // bare height "1080" -> "1080p"
+  return raw;
 }
 
 const $ = (s, p = document) => p.querySelector(s);
@@ -429,6 +443,8 @@ async function loadHome() {
   const rowsEl = $('#home-source-rows');
   if (rowsEl) rowsEl.innerHTML = '';
 
+  renderContinueWatching();
+
   const activeTmdb = state.sources.filter(s => s.active && !s.isKawaiiAnime && !s.isAnimeSource);
   const movieItems = [];
   const tvItems = [];
@@ -537,11 +553,34 @@ async function loadSectionGrid(section) {
 let _lastSearchResults = [];
 let _searchVirtualGrid = null;
 
+// Human-friendly source labels: "Movie Source 1", "Anime Source 2", ...
+// These are display-only; source names are still used for lookups.
+function sourceDisplayName(s) {
+  const isAnime = s.isKawaiiAnime || s.isAnimeSource;
+  let n = 0;
+  for (const other of state.sources) {
+    if (other.name === s.name) { n++; break; }
+    if ((other.isKawaiiAnime || other.isAnimeSource) === isAnime) n++;
+  }
+  return `${isAnime ? 'Anime' : 'Movie'} Source ${n || 1}`;
+}
+
+// Provider reachability, refreshed from the main process at startup.
+let _providerHealth = {};
+async function refreshProviderHealth() {
+  try {
+    _providerHealth = await window.api.getProviderHealth();
+  } catch {}
+}
+function healthDotClass(name) {
+  return _providerHealth[name] || 'unknown';
+}
+
 function populateSourceFilter() {
   const sel = $('#filter-source-select');
   if (!sel) return;
   sel.innerHTML = '<option value="all">All Sources</option>' +
-    state.sources.map(s => `<option value="${s.name}">${s.name}</option>`).join('');
+    state.sources.map(s => `<option value="${s.name}">${sourceDisplayName(s)}</option>`).join('');
 }
 
 function renderSearchGrid(items, filter) {
@@ -662,8 +701,9 @@ async function openDetail(movie) {
 
   const chipsEl = $('#source-chips');
   if (chipsEl) {
+    // Cheap: fetch (already-settled by startup) health statuses for dots.
     chipsEl.innerHTML = state.sources.map(s =>
-      `<button class="source-chip ${s.name===source.name?'active':''}" data-source="${s.name}">${s.name}</button>`
+      `<button class="source-chip ${s.name===source.name?'active':''}" data-source="${s.name}"><span class="src-dot dot-${healthDotClass(s.name)}"></span>${sourceDisplayName(s)}</button>`
     ).join('');
     $$('.source-chip', chipsEl).forEach(c => c.addEventListener('click', () => switchSource(c.dataset.source, movie)));
   }
@@ -764,16 +804,16 @@ function renderDetailInfo(movie, detail, source) {
   if (watchBtn) {
     watchBtn.onclick = async () => {
       const downloads = detail.downloads || [];
-      const streamable = downloads.find(d => {
-        const u = (d.torrentUrl||d.sourceUrl||d.url||'').toLowerCase();
-        return STREAM_EMBEDS.some(h => u.includes(h)) || u.includes('.m3u8') || u.includes('.mp4') || u.includes('.txt');
-      });
-      if (streamable) {
-        playVideo(streamable.torrentUrl||streamable.sourceUrl||streamable.url);
+      // Unified pick (PeeStream → Abibli → embed providers) so Watch Now
+      // always uses the same stream as the unified Play button.
+      const unified = pickUnifiedDownload(downloads, state.currentSource && state.currentSource.baseUrl ? new URL(state.currentSource.baseUrl).hostname.replace(/^www\./, '').toLowerCase() : '');
+      const resumeAt = movie && movie._resumeAt ? movie._resumeAt : 0;
+      if (unified) {
+        playVideo(unified.torrentUrl||unified.sourceUrl||unified.url, movie.title, undefined, { resume: resumeAt });
       } else if (downloads.length && downloads[0].sourceUrl) {
-        playVideo(downloads[0].sourceUrl);
+        playVideo(downloads[0].sourceUrl, movie.title, undefined, { resume: resumeAt });
       } else if (downloads.length && downloads[0].torrentUrl) {
-        playVideo(downloads[0].torrentUrl);
+        playVideo(downloads[0].torrentUrl, movie.title, undefined, { resume: resumeAt });
       } else if (detail.episodesData) {
         const seasonKeys = Object.keys(detail.episodesData);
         if (seasonKeys.length && detail.episodesData[seasonKeys[0]].length) {
@@ -834,7 +874,7 @@ function renderSeasons(seasons, episodesData, movie) {
     return;
   }
   if (!_activeSeasonKey || !seasonKeys.includes(_activeSeasonKey)) _activeSeasonKey = seasonKeys[0];
-  const isAnime = movie && (movie._isAnimeSource || (movie.source && ['LunaAnime','AnimeX','AniLight','KawaiiAnime','Anikoto'].includes(movie.source)));
+  const isAnime = movie && (movie._isAnimeSource || (movie.source && ['LunaAnime','AnimeX','KawaiiAnime','Anikoto'].includes(movie.source)));
   if (langToggle) {
     langToggle.classList.toggle('hidden', !isAnime);
     if (isAnime) {
@@ -852,16 +892,21 @@ function renderSeasons(seasons, episodesData, movie) {
   listEl.innerHTML = seasonKeys.map((key, i) =>
     `<button class="source-chip ${key===_activeSeasonKey?'active':''}" data-season="${key}">${key}</button>`
   ).join('');
+  const getSeasonNum = (key) => {
+    const m = String(key || '').match(/\d+/);
+    return m ? parseInt(m[0], 10) : 1;
+  };
   $$('.source-chip', listEl).forEach(b => b.addEventListener('click', () => {
     _activeSeasonKey = b.dataset.season;
     $$('.source-chip', listEl).forEach(x => x.classList.remove('active'));
     b.classList.add('active');
-    renderEpisodes(episodesData[_activeSeasonKey], epsGrid, movie);
+    renderEpisodes(episodesData[_activeSeasonKey], epsGrid, movie, getSeasonNum(_activeSeasonKey));
   }));
-  renderEpisodes(episodesData[_activeSeasonKey], epsGrid, movie);
+  renderEpisodes(episodesData[_activeSeasonKey], epsGrid, movie, getSeasonNum(_activeSeasonKey));
 }
 
-function renderEpisodes(episodes, container, movie) {
+function renderEpisodes(episodes, container, movie, seasonNum) {
+  seasonNum = seasonNum || 1;
   if (!episodes || !episodes.length) {
     container.innerHTML = '<p style="color:var(--text-muted);padding:16px">No episodes available</p>';
     return;
@@ -873,7 +918,7 @@ function renderEpisodes(episodes, container, movie) {
     const link = (ep.link || '').replace(/"/g, '&quot;');
     const thumbBg = thumb ? `background-image:url('${thumb.replace(/'/g, '%27')}')` : '';
     return `
-    <div class="episode-card" data-link="${link}" data-title="${epTitle}" data-ep-num="${epNum}">
+    <div class="episode-card" data-link="${link}" data-title="${epTitle}" data-ep-num="${epNum}" data-season="${seasonNum}">
       <div class="episode-thumb" ${thumbBg ? `style="${thumbBg};background-size:cover;background-position:center"` : ''}>
         <div class="episode-play"><div class="episode-play-circle">
           <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -882,7 +927,7 @@ function renderEpisodes(episodes, container, movie) {
       <div class="episode-info">
         <div class="episode-number">E${epNum}</div>
         <div class="episode-title">${epTitle}</div>
-        <button class="episode-dl-btn" data-ep-link="${link}" data-ep-title="${epTitle}" data-ep-num="${epNum}">Download</button>
+        <button class="episode-dl-btn" data-ep-link="${link}" data-ep-title="${epTitle}" data-ep-num="${epNum}" data-season="${seasonNum}">Download</button>
         <div class="episode-quality-picker hidden" data-ep-num="${epNum}"></div>
       </div>
     </div>`;
@@ -892,10 +937,17 @@ function renderEpisodes(episodes, container, movie) {
     let link = card.dataset.link;
     const epTitle = card.dataset.title || 'Episode';
     const epNum = parseInt(card.dataset.epNum || '1');
+    const season = parseInt(card.dataset.season || '1', 10);
 
     if (link) {
       link = addLangToUrl(link, state.animeLang);
-      playVideo(link, epTitle, state.animeLang);
+      playVideo(link, epTitle, state.animeLang, {
+        tmdb: movie && movie.tmdbId ? String(movie.tmdbId) : '',
+        imdb: '',
+        type: 'tv',
+        season,
+        episode: epNum
+      });
     }
   }));
   $$('.episode-dl-btn', container).forEach(btn => btn.addEventListener('click', async e => {
@@ -909,19 +961,28 @@ function renderEpisodes(episodes, container, movie) {
     const fileName = `${showTitle} - S01E${epNum} - ${epTitle}`;
 
     let streamUrl = epLink;
-    const isEmbed = !/\.(m3u8|mp4|txt|ts)(\?|$)/i.test(epLink.toLowerCase());
-    if (isEmbed) {
+    if (epLink.startsWith('abibli://') || epLink.startsWith('peestream://')) {
       try {
-        const lower = epLink.toLowerCase();
-        const isKawaii = lower.includes('kawaii-anime.com/watch/');
-    const isAnimeSrc = lower.includes('luna-stream.me/') || lower.includes('animex.one/') || lower.includes('anilight.live/') || lower.includes('anikototv.to/');
-        const result = isKawaii
-          ? await window.api.scrapeKawaiiVideo(epLink)
-          : isAnimeSrc
-          ? await window.api.scrapeAnimeSourceVideo(epLink, state.animeLang)
-          : await window.api.scrapeMoviboxStream(epLink);
+        const result = epLink.startsWith('peestream://')
+          ? await window.api.resolvePeestreamStream(epLink)
+          : await window.api.resolveAbibliStream(epLink);
         if (result.success && result.streamUrl) streamUrl = result.streamUrl;
       } catch {}
+    } else {
+      const isEmbed = !/\.(m3u8|mp4|txt|ts)(\?|$)/i.test(epLink.toLowerCase());
+      if (isEmbed) {
+        try {
+          const lower = epLink.toLowerCase();
+          const isKawaii = lower.includes('kawaii-anime.com/watch/');
+          const isAnimeSrc = lower.includes('luna-stream.me/') || lower.includes('animex.one/') || lower.includes('anikototv.to/');
+          const result = isKawaii
+            ? await window.api.scrapeKawaiiVideo(epLink)
+            : isAnimeSrc
+            ? await window.api.scrapeAnimeSourceVideo(epLink, state.animeLang)
+            : await window.api.scrapeMoviboxStream(epLink);
+          if (result.success && result.streamUrl) streamUrl = result.streamUrl;
+        } catch {}
+      }
     }
 
     let qualities = [];
@@ -952,6 +1013,38 @@ function renderEpisodes(episodes, container, movie) {
   }));
 }
 
+// Unified stream choice used by Watch Now and the single Play/Download buttons.
+// The row always represents the CURRENTLY SELECTED source: whichever source
+// chip the user picked decides the stream, so switching sources actually
+// changes the qualities you get. Falls back to PeeStream -> Abibli -> any.
+const UNIFIED_PRIORITY = ['peestream', 'abibli', 'vidfast', 'vidcore', 'streamex'];
+function currentSourceDomain() {
+  try {
+    const src = state.currentSource;
+    if (src && src.baseUrl) return new URL(src.baseUrl).hostname.replace(/^www\./, '');
+  } catch {}
+  return '';
+}
+function pickUnifiedDownload(downloads, sourceDomain) {
+  const usable = (downloads || []).filter(d => d && (d.torrentUrl || d.sourceUrl || d.url));
+  if (!usable.length) return null;
+  // 1) The current source's own primary stream ("<domain> · Stream")
+  const domain = (sourceDomain || currentSourceDomain() || '').toLowerCase();
+  if (domain) {
+    const own = usable.find(d => (d.quality || '').toLowerCase().startsWith(domain));
+    if (own) return own;
+  }
+  // 2) Per-source entry by provider name (embed/pseudo rows)
+  for (const want of UNIFIED_PRIORITY) {
+    const hit = usable.find(d => (d.quality || '').toLowerCase().includes(want));
+    if (hit) return hit;
+  }
+  return usable[0];
+}
+function hasUnifiedStream(downloads) {
+  return (downloads || []).length > 0;
+}
+
 function renderDownloadsList(downloads, movie) {
   const container = $('#dl-options-list');
   const loading = $('#dl-loading');
@@ -963,7 +1056,13 @@ function renderDownloadsList(downloads, movie) {
     return;
   }
   if (errorEl) errorEl.classList.add('hidden');
-  container.innerHTML = downloads.map((d, i) => `
+
+  // Unified mode: one Play + one Download for the CURRENT source, so
+  // switching sources changes the qualities you see.
+  const unified = hasUnifiedStream(downloads) ? pickUnifiedDownload(downloads) : null;
+  const rows = unified ? [unified] : downloads;
+
+  container.innerHTML = rows.map((d, i) => `
     <div class="download-item">
       <div class="download-info">
         <div class="download-title">${d.quality||'Unknown'}${d.size?' · '+d.size:''}</div>
@@ -976,21 +1075,28 @@ function renderDownloadsList(downloads, movie) {
     </div>`).join('');
 
   $$('.play-dl-btn', container).forEach(btn => btn.addEventListener('click', async () => {
-    const d = downloads[parseInt(btn.dataset.idx)];
+    const d = rows[parseInt(btn.dataset.idx)];
     if (!d) return;
     const url = d.torrentUrl || d.sourceUrl || d.url;
     if (url) playVideo(url);
   }));
 
   $$('.save-dl-btn', container).forEach(btn => btn.addEventListener('click', async () => {
-    const d = downloads[parseInt(btn.dataset.idx)];
+    const d = rows[parseInt(btn.dataset.idx)];
     if (!d) return;
     const url = d.torrentUrl || d.sourceUrl || d.url;
     btn.textContent = 'Analyzing...';
     btn.disabled = true;
 
     let streamUrl = url;
-    if (d.isMoviboxStream && url) {
+    if (url.startsWith('abibli://') || url.startsWith('peestream://')) {
+      try {
+        const result = url.startsWith('peestream://')
+          ? await window.api.resolvePeestreamStream(url)
+          : await window.api.resolveAbibliStream(url);
+        if (result.success && result.streamUrl) streamUrl = result.streamUrl;
+      } catch {}
+    } else if (d.isMoviboxStream && url) {
       try {
         const result = await window.api.scrapeMoviboxStream(url);
         if (result.success && result.streamUrl) streamUrl = result.streamUrl;
@@ -1049,15 +1155,20 @@ function initCustomControls() {
   const skipBackBtn = document.getElementById('skipBackBtn');
   const skipForwardBtn = document.getElementById('skipForwardBtn');
   const pipBtn = document.getElementById('pipBtn');
-  const fullscreenBtn = document.getElementById('fullscreenBtn');
+  const fullscreenBtn = document.getElementById('fullscreenBtn') || document.getElementById('fullscreenBtnTop');
   const cacheBtn = document.getElementById('cacheBtn');
+  const subsBtn = document.getElementById('subsBtn');
+  const subsMenu = document.getElementById('subsMenu');
   if (!video) return;
 
   function fmt(seconds) {
     if (!isFinite(seconds)) return '0:00';
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60).toString().padStart(2, '0');
-    return m + ':' + s;
+    const total = Math.max(0, Math.floor(seconds));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = (total % 60).toString().padStart(2, '0');
+    // H:MM:SS for long content (2h films), M:SS otherwise
+    return (h > 0 ? h + ':' + m.toString().padStart(2, '0') : m) + ':' + s;
   }
 
   function updateUI() {
@@ -1091,9 +1202,26 @@ function initCustomControls() {
     centerPlayBtn.style.display = '';
     playToggle.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
   });
-  video.addEventListener('timeupdate', updateUI);
+  let lastProgressSave = 0;
+  video.addEventListener('timeupdate', () => {
+    updateUI();
+    // Throttled Continue Watching persistence (every ~2s while playing)
+    const now = Date.now();
+    if (now - lastProgressSave >= 2000 && _currentContinueCtx && !video.paused) {
+      lastProgressSave = now;
+      saveContinue({ ..._currentContinueCtx, at: Math.floor(video.currentTime || 0), dur: Math.floor(video.duration || 0) });
+    }
+  });
+  video.addEventListener('pause', () => {
+    if (_currentContinueCtx && video.currentTime > 0) {
+      saveContinue({ ..._currentContinueCtx, at: Math.floor(video.currentTime || 0), dur: Math.floor(video.duration || 0) });
+    }
+  });
   video.addEventListener('loadedmetadata', updateUI);
-  video.addEventListener('ended', updateUI);
+  video.addEventListener('ended', () => {
+    updateUI();
+    if (_currentContinueCtx) saveContinue({ ..._currentContinueCtx, at: 0, dur: 0 }); // finished -> drop entry
+  });
 
   // Volume
   volumeBtn.addEventListener('click', () => {
@@ -1125,23 +1253,163 @@ function initCustomControls() {
   });
 
   // PiP
-  pipBtn.addEventListener('click', () => {
-    if (document.pictureInPictureElement) {
-      document.exitPictureInPicture();
-    } else if (video.requestPictureInPicture) {
-      video.requestPictureInPicture();
+  pipBtn.addEventListener('click', async () => {
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+        return;
+      }
+      if (typeof video.requestPictureInPicture !== 'function') {
+        showToast('Picture-in-picture is not supported');
+        return;
+      }
+      await video.requestPictureInPicture();
+    } catch (e) {
+      console.warn('[player] PiP failed:', e && e.message);
+      showToast('Picture-in-picture unavailable right now');
     }
   });
 
-  // Save-for-offline: start caching the current video manually
+  // Attach an external subtitle (VDRK .vtt / Natsuki .srt) as a <track>.
+  async function enableExternalSubtitle(sub) {
+    try {
+      const res = await window.api.fetchSubtitleText(sub.url);
+      if (!res || !res.success) { showToast('Subtitle not found'); return; }
+      const vtt = (sub.ext === 'srt') ? srtToVtt(res.text) : res.text;
+      const blob = new Blob([vtt], { type: 'text/vtt' });
+      const url = URL.createObjectURL(blob);
+      const track = document.createElement('track');
+      track.kind = 'subtitles';
+      track.label = sub.label || 'Subtitles';
+      track.srclang = 'en';
+      track.default = true;
+      track.src = url;
+      track._blobUrl = url;
+      video.appendChild(track);
+      showToast('Subtitles on: ' + (sub.label || ''));
+    } catch (e) { console.warn('[subs] external failed:', e); }
+  }
+
+  // External subtitle list for the current playback (cached per title).
+  async function loadExternalSubtitleList() {
+    const ctx = _currentSubsContext;
+    if (!ctx || !ctx.tmdb) return [];
+    const key = `${ctx.tmdb}|${ctx.imdb}|${ctx.type}|${ctx.season}|${ctx.episode}`;
+    if (_subsCache.has(key)) return _subsCache.get(key);
+    try {
+      const res = await window.api.fetchSubtitles(ctx);
+      const list = (res && res.subtitles) || [];
+      _subsCache.set(key, list);
+      return list;
+    } catch { return []; }
+  }
+
+  // Subtitles: list native text tracks (HLS subtitle renditions, <track>
+  // elements) plus a loader for a local WebVTT file.
+  function renderSubsMenu() {
+    if (!subsMenu) return;
+    const tracks = video.textTracks && video.textTracks.length ? Array.from(video.textTracks) : [];
+    subsBtn.classList.toggle('active-subs', tracks.some(t => t.mode === 'showing'));
+    const items = [];
+    items.push(`<button class="subs-menu-item${tracks.every(t => t.mode !== 'showing') ? ' active' : ''}" data-track="off">Off</button>`);
+    tracks.forEach((t, i) => {
+      const label = t.label || t.language || ('Subtitle ' + (i + 1));
+      items.push(`<button class="subs-menu-item${t.mode === 'showing' ? ' active' : ''}" data-track="${i}">${label}</button>`);
+    });
+    items.push('<div class="subs-menu-divider"></div>');
+    items.push('<button class="subs-menu-item" data-track="load">Load subtitle file…</button>');
+    items.push('<button class="subs-menu-item" data-track="ext-loading" disabled>Fetching subtitles…</button>');
+    subsMenu.innerHTML = items.join('');
+    const external = loadExternalSubtitleList();
+    external.then(list => {
+      const loader = subsMenu.querySelector('[data-track="ext-loading"]');
+      if (loader) loader.remove();
+      if (!list || !list.length) return;
+      const divider = document.createElement('div');
+      divider.className = 'subs-menu-divider';
+      subsMenu.appendChild(divider);
+      const head = document.createElement('div');
+      head.className = 'subs-menu-item';
+      head.style.cursor = 'default';
+      head.style.opacity = '0.6';
+      head.textContent = 'Available subtitles';
+      subsMenu.appendChild(head);
+      list.slice(0, 40).forEach(sub => {
+        const btn = document.createElement('button');
+        btn.className = 'subs-menu-item';
+        btn.dataset.track = 'ext';
+        btn.textContent = sub.label || 'Unknown';
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          btn.textContent = (sub.label || 'Unknown') + ' (loading…)';
+          await enableExternalSubtitle(sub);
+          subsMenu.classList.add('hidden');
+        });
+        subsMenu.appendChild(btn);
+      });
+    });
+    $$('.subs-menu-item', subsMenu).forEach(btn => btn.addEventListener('click', async () => {
+      const val = btn.dataset.track;
+      if (val === 'off') {
+        for (const t of video.textTracks) t.mode = 'disabled';
+      } else if (val === 'ext' || val === 'ext-loading') {
+        return;
+      } else if (val === 'load') {
+        subsMenu.classList.add('hidden');
+        try {
+          const res = await window.api.pickSubtitleFile();
+          if (res && res.success && res.text) {
+            const blob = new Blob([res.text], { type: 'text/vtt' });
+            const url = URL.createObjectURL(blob);
+            const track = document.createElement('track');
+            track.kind = 'subtitles';
+            track.label = res.name || 'Loaded subtitles';
+            track.srclang = 'en';
+            track.default = true;
+            track.src = url;
+            track._blobUrl = url;
+            video.appendChild(track);
+            showToast('Subtitles loaded: ' + (res.name || 'subtitle file'));
+          }
+        } catch (e) { console.warn('[subs] load failed:', e); }
+        return;
+      } else {
+        const idx = parseInt(val, 10);
+        for (let i = 0; i < video.textTracks.length; i++) {
+          video.textTracks[i].mode = i === idx ? 'showing' : 'disabled';
+        }
+      }
+      renderSubsMenu();
+    }));
+  }
+  if (subsBtn) {
+    subsBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!subsMenu) return;
+      renderSubsMenu();
+      subsMenu.classList.toggle('hidden');
+    });
+    document.addEventListener('click', (e) => {
+      if (subsMenu && !subsMenu.classList.contains('hidden') &&
+          !e.target.closest('#subsMenu') && !e.target.closest('#subsBtn')) {
+        subsMenu.classList.add('hidden');
+      }
+    });
+  }
+
+  // Save-for-offline: HLS streams are saved via the HLS downloader;
+  // direct files go through the background cache.
   cacheBtn.addEventListener('click', () => {
     if (!_currentPlayingUrl) return;
-    if (isHlsUrl(_currentPlayingUrl)) {
-      showToast('HLS streams cannot be saved for offline');
+    if (!isHlsUrl(_currentPlayingUrl) && isLocalServerUrl(_currentPlayingUrl)) {
+      showToast('This video is already available offline');
       return;
     }
-    if (isLocalServerUrl(_currentPlayingUrl)) {
-      showToast('This video is already available offline');
+    if (isHlsUrl(_currentPlayingUrl)) {
+      try {
+        window.api.startDownload(_currentPlayingUrl, _currentPlayingTitle || 'video', 'Auto', (state.currentMovie && state.currentMovie.image) || '');
+        showToast('Saving for offline — check Downloads');
+      } catch (e) { console.warn('[player] save failed:', e); }
       return;
     }
     if (_cachingUrl === _currentPlayingUrl) {
@@ -1207,6 +1475,13 @@ function destroyPlayer() {
   const video = document.getElementById('modal-video-player');
   if (video) {
     video.pause();
+    // Clean up any user-loaded subtitle tracks
+    video.querySelectorAll('track').forEach(track => {
+      if (track._blobUrl) { try { URL.revokeObjectURL(track._blobUrl); } catch {} }
+      track.remove();
+    });
+    const sm = $('#subsMenu');
+    if (sm) sm.classList.add('hidden');
     video.removeAttribute('src');
     video.load();
   }
@@ -1244,14 +1519,102 @@ async function loadStream(video, url, title) {
   video.removeAttribute('src');
   video.innerHTML = '';
 
+  // Watchdog: if nothing ever becomes playable, tell the user instead of
+  // leaving the player stuck on a black screen.
+  const clearWatchdog = (v) => { try { if (v._loadWatchdog) clearTimeout(v._loadWatchdog); } catch {} v._loadWatchdog = null; };
+  const seekResumeOnce = (v) => {
+    if (!_pendingResumeAt || _pendingResumeAt < 10) return;
+    const target = _pendingResumeAt;
+    _pendingResumeAt = 0;
+    try {
+      const go = () => {
+        try {
+          if (isFinite(v.duration) && target < v.duration - 20) { v.currentTime = target; }
+        } catch {}
+      };
+      if (v.readyState >= 2) go();
+      else v.addEventListener('canplay', go, { once: true });
+    } catch {}
+  };
+  const armWatchdog = (v) => {
+    clearWatchdog(v);
+    v._loadWatchdog = setTimeout(() => {
+      v._loadWatchdog = null;
+      if (document.contains(v) && v.readyState < 2) {
+        const lo = $('#video-loading-overlay');
+        if (lo) lo.classList.add('hidden');
+        showToast('The stream is taking too long to start — try another source');
+      }
+    }, 60000);
+  };
+
   if (isHlsUrl(url) && typeof Hls !== 'undefined' && Hls.isSupported()) {
-    _hlsInstance = new Hls();
-    _hlsInstance.loadSource(url);
-    _hlsInstance.attachMedia(video);
-    _hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
-    _hlsInstance.on(Hls.Events.ERROR, (e, data) => {
-      if (data.fatal) { console.error('[hls] fatal error:', data); _hlsInstance.destroy(); _hlsInstance = null; }
-    });
+    // Mirror failover: providers hand out several CDN mirrors per title.
+    // When the active one dies, silently switch to the next instead of
+    // leaving the player stuck.
+    const mirrors = ((_activeMirrors || []).filter(u => u && u !== url));
+    let stallCount = 0;
+
+    const startHls = (srcUrl) => {
+      // Tolerant buffering for slow/variable links and flaky CDNs: keep more
+      // media buffered, retry fragments and manifests a few extra times.
+      _hlsInstance = new Hls({
+        maxBufferLength: 60,
+        maxMaxBufferLength: 600,
+        backBufferLength: 90,
+        maxBufferHole: 1.2,
+        fragLoadingMaxRetry: 8,
+        levelLoadingMaxRetry: 6,
+        manifestLoadingMaxRetry: 4,
+        abrEagerBuffering: true
+      });
+      _hlsInstance.loadSource(srcUrl);
+      _hlsInstance.attachMedia(video);
+      _hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+      _hlsInstance.on(Hls.Events.ERROR, (e, data) => {
+        console.error('[hls] error:', data.type, data.details, 'fatal=' + data.fatal);
+        if (data.fatal) {
+          if (mirrors.length) {
+            const next = mirrors.shift();
+            console.warn('[player] failing over to mirror ' + mirrors.length + ' remaining');
+            showToast('Switched to a backup mirror');
+            try { _hlsInstance.destroy(); } catch {}
+            _currentPlayingUrl = next;
+            startHls(next);
+            return;
+          }
+          _hlsInstance.destroy(); _hlsInstance = null;
+          clearWatchdog(video);
+          const lo = $('#video-loading-overlay');
+          if (lo) lo.classList.add('hidden');
+          showToast('This stream could not be played — try another source');
+        } else if (data.type === 'mediaError' && data.details === 'bufferStalledError') {
+          // Repeated non-fatal stalls = the CDN mirror is dying: fail over
+          // (or fail out) instead of hanging on a black frame forever.
+          stallCount++;
+          if (stallCount >= 6 && video.readyState < 2) {
+            if (mirrors.length) {
+              const next = mirrors.shift();
+              showToast('Switched to a backup mirror');
+              try { _hlsInstance.destroy(); } catch {}
+              stallCount = 0;
+              _currentPlayingUrl = next;
+              startHls(next);
+              return;
+            }
+            try { _hlsInstance.destroy(); } catch {}
+            _hlsInstance = null;
+            clearWatchdog(video);
+            const lo = $('#video-loading-overlay');
+            if (lo) lo.classList.add('hidden');
+            showToast('This stream is stalling — try another source');
+          }
+        }
+      });
+    };
+    startHls(url);
+    video.addEventListener('canplay', () => { stallCount = 0; clearWatchdog(video); seekResumeOnce(video); }, { once: true });
+    armWatchdog(video);
     return;
   }
 
@@ -1270,9 +1633,21 @@ async function loadStream(video, url, title) {
   video.appendChild(source);
   video.load();
   video.play().catch(() => {});
+  video.addEventListener('canplay', () => { clearWatchdog(video); seekResumeOnce(video); }, { once: true });
+  video.addEventListener('error', () => {
+    if (video.error && video.readyState < 2) {
+      clearWatchdog(video);
+      const lo = $('#video-loading-overlay');
+      if (lo) lo.classList.add('hidden');
+      showToast('This stream could not be played — try another source');
+    }
+  }, { once: true });
+  armWatchdog(video);
 }
 
 function isLocalServerUrl(url) {
+  // Proxy URLs (127.0.0.1 /hls/ /abibli/) wrap live remote streams — not local files.
+  if (url.includes('/hls?') || url.includes('/abibli/')) return false;
   return url.includes('127.0.0.1') || url.includes('localhost');
 }
 
@@ -1359,7 +1734,163 @@ function startBackgroundCache(url, title) {
   });
 }
 
-async function playVideo(url, title, lang) {
+// Parse subtitle context (TMDB/IMDb ids, season/episode) from the playing URL
+// or from the current title. Used by the subtitles menu.
+function getSubsContext(url, meta) {
+  const fallback = {
+    tmdb: (state.currentMovie && state.currentMovie.tmdbId) ? String(state.currentMovie.tmdbId) : '',
+    imdb: '',
+    type: (state.currentMovie && state.currentMovie.mediaType) || 'movie',
+    season: 1,
+    episode: 1
+  };
+  const fromMeta = Object.assign({}, fallback, meta || {});
+  try {
+    const params = new URLSearchParams(String(url || '').split('?')[1] || '');
+    if (params.get('tmdb')) fromMeta.tmdb = params.get('tmdb');
+    if (params.get('imdb')) fromMeta.imdb = params.get('imdb');
+    if (params.get('type') === 'tv') fromMeta.type = 'tv';
+    else if (params.get('type') === 'movie') fromMeta.type = 'movie';
+    if (params.get('season')) fromMeta.season = parseInt(params.get('season'), 10) || fromMeta.season;
+    if (params.get('episode')) fromMeta.episode = parseInt(params.get('episode'), 10) || fromMeta.episode;
+  } catch {}
+  return fromMeta;
+}
+
+// CDN mirrors for the current playback (from stream resolvers). loadStream
+// fails over through these when the active mirror dies.
+let _activeMirrors = [];
+
+// SRT -> WebVTT converter for subtitle files served as .srt.
+function srtToVtt(srt) {
+  const parseTime = (t) => {
+    const m = String(t || '').trim().match(/(\d+):(\d+):(\d+),(\d+)/);
+    if (!m) return t;
+    return `${m[1]}:${m[2]}:${m[3]}.${m[4]}`;
+  };
+  const blocks = String(srt || '').replace(/\r/g, '').split(/\n\s*\n/);
+  let out = 'WEBVTT\n\n';
+  for (const block of blocks) {
+    const lines = block.split('\n').filter(Boolean);
+    if (!lines.length) continue;
+    const timeLine = lines.find(l => l.includes('-->'));
+    if (!timeLine) continue;
+    const [start, end] = timeLine.split('-->');
+    out += `${parseTime(start)} --> ${parseTime(end)}\n`;
+    const text = lines.filter(l => !l.includes('-->') && !/^\d+$/.test(l.trim()));
+    out += text.join('\n') + '\n\n';
+  }
+  return out;
+}
+
+let _currentSubsContext = null;
+let _subsCache = new Map();
+
+// ─── Continue Watching ───────────────────────────────────────────────────────
+// Persist watch position per title (+ episode for TV) and resume next time.
+const CONTINUE_KEY = 'vs_continue';
+function loadContinue_map() {
+  try { return JSON.parse(localStorage.getItem(CONTINUE_KEY) || '{}'); } catch { return {}; }
+}
+function continueKey(cm) {
+  return `${cm.type}|${cm.tmdbId}|${cm.season || 0}|${cm.episode || 0}`;
+}
+function saveContinue(cm) {
+  if (!cm || !cm.tmdbId) return;
+  const map = loadContinue_map();
+  const k = continueKey(cm);
+  const at = cm.at || 0, dur = cm.dur || 0;
+  // Drop entries that are done (or almost done)
+  if (at > 5 && dur > 0 && (at / dur) > 0.95) { delete map[k]; }
+  else if (at > 5) { map[k] = { ...cm, updated: Date.now() }; }
+  else { delete map[k]; }
+  try { localStorage.setItem(CONTINUE_KEY, JSON.stringify(map)); } catch {}
+}
+function getContinueFor(cm) {
+  const map = loadContinue_map();
+  return map[continueKey(cm)] || null;
+}
+
+function removeContinue(cm) {
+  const map = loadContinue_map();
+  delete map[continueKey(cm)];
+  try { localStorage.setItem(CONTINUE_KEY, JSON.stringify(map)); } catch {}
+  renderContinueWatching();
+}
+
+// "Continue Watching" row on the home screen (from saved progress).
+function renderContinueWatching() {
+  const section = $('#home-continue-section');
+  const row = $('#home-continue-row');
+  if (!section || !row) return;
+  const map = loadContinue_map();
+  const items = Object.values(map)
+    .filter(e => e && e.at > 5)
+    .sort((a, b) => (b.updated || 0) - (a.updated || 0))
+    .slice(0, 15);
+  if (!items.length) { section.classList.add('hidden'); return; }
+  section.classList.remove('hidden');
+  row.innerHTML = '';
+  for (const entry of items) {
+    const card = createCard({
+      title: entry.title,
+      image: entry.image,
+      year: entry.year || '',
+      quality: '',
+      tmdbId: entry.tmdbId,
+      mediaType: entry.type,
+      isTv: entry.type === 'tv',
+      link: ''
+    });
+    card.addEventListener('click', () => {
+      openDetail({
+        title: entry.title,
+        image: entry.image,
+        backdrop: entry.backdrop || entry.image,
+        year: entry.year || '',
+        tmdbId: entry.tmdbId,
+        mediaType: entry.type,
+        type: entry.type,
+        isTv: entry.type === 'tv',
+        link: `${state.sources.find(s => s.active && !s.isKawaiiAnime && !s.isAnimeSource)?.baseUrl || 'https://streamex.sh'}/${entry.type === 'tv' ? 'tv' : 'movie'}/${entry.tmdbId}`,
+        baseUrl: state.sources.find(s => s.active && !s.isKawaiiAnime && !s.isAnimeSource)?.baseUrl || 'https://streamex.sh',
+        source: (state.sources.find(s => s.active && !s.isKawaiiAnime && !s.isAnimeSource) || {}).name || '',
+        description: '',
+        _resumeAt: entry.at
+      });
+    });
+    const pct = entry.dur > 0 ? Math.min(100, Math.round((entry.at / entry.dur) * 100)) : 0;
+    const bar = document.createElement('div');
+    bar.className = 'cw-progress';
+    bar.innerHTML = `<div class="cw-progress-fill" style="width:${pct}%"></div>`;
+    card.appendChild(bar);
+    card.title = `Resume at ${Math.max(1, Math.floor(entry.at / 60))} min`;
+    row.appendChild(card);
+  }
+  prismPulse();
+}
+
+let _currentContinueCtx = null;
+let _pendingResumeAt = 0;
+
+// Mirror options for failover (same master on different CDN nodes).
+// On a fatal error the player reloads from the next master (auto ABR).
+function qualityMirrors() {
+  if (!_activeMirrors || !_activeMirrors.length) return undefined;
+  return _activeMirrors.slice();
+}
+
+async function playVideo(url, title, lang, meta) {
+  _currentSubsContext = getSubsContext(url, meta);
+  _currentContinueCtx = {
+    title: title || (state.currentMovie && state.currentMovie.title) || 'Untitled',
+    image: (state.currentMovie && (state.currentMovie.image || state.currentMovie.backdrop)) || '',
+    tmdbId: _currentSubsContext.tmdb,
+    type: _currentSubsContext.type,
+    season: _currentSubsContext.season || 0,
+    episode: _currentSubsContext.episode || 0
+  };
+  _pendingResumeAt = meta && meta.resume ? meta.resume : (state.currentMovie && state.currentMovie._resumeAt) || 0;
   if (!url) return;
   const lower = url.toLowerCase();
   lang = lang || state.animeLang || 'sub';
@@ -1394,9 +1925,34 @@ async function playVideo(url, title, lang) {
   container.querySelectorAll('.glow-border').forEach(el => el.classList.add('glow-active'));
 
   let resolvedUrl = url;
-  if (isEmbed) {
+  _activeMirrors = [];
+  if (lower.startsWith('abibli://') || lower.startsWith('peestream://')) {
+    const isPeestream = lower.startsWith('peestream://');
+    try {
+      const result = isPeestream
+        ? await window.api.resolvePeestreamStream(url)
+        : await window.api.resolveAbibliStream(url);
+      if (result.success && result.streamUrl) {
+        resolvedUrl = result.streamUrl;
+        if (Array.isArray(result.streamUrls) && result.streamUrls.length) {
+          _activeMirrors = result.streamUrls.filter(u => u && u !== resolvedUrl);
+        }
+        if (!title && result.title) title = result.title;
+      } else {
+        if (loadingOverlay) loadingOverlay.classList.add('hidden');
+        destroyPlayer();
+        showToast(result.error || `Stream not available on ${isPeestream ? 'PeeStream' : 'Abibli'}`);
+        return;
+      }
+    } catch (e) {
+      if (loadingOverlay) loadingOverlay.classList.add('hidden');
+      destroyPlayer();
+      showToast(`Failed to resolve ${isPeestream ? 'PeeStream' : 'Abibli'} stream`);
+      return;
+    }
+  } else if (isEmbed) {
     const isKawaii = lower.includes('kawaii-anime.com/watch/');
-    const isAnimeSrc = lower.includes('luna-stream.me/') || lower.includes('animex.one/') || lower.includes('anilight.live/') || lower.includes('anikototv.to/');
+    const isAnimeSrc = lower.includes('luna-stream.me/') || lower.includes('animex.one/') || lower.includes('anikototv.to/');
     try {
       const result = isKawaii
         ? await window.api.scrapeKawaiiVideo(url)
@@ -1407,12 +1963,16 @@ async function playVideo(url, title, lang) {
         resolvedUrl = result.streamUrl;
       } else {
         if (loadingOverlay) loadingOverlay.classList.add('hidden');
+        destroyPlayer();
         console.error('[player] scrape failed:', result.error);
+        showToast(result.error || 'This source could not find a playable stream');
         return;
       }
     } catch (e) {
       if (loadingOverlay) loadingOverlay.classList.add('hidden');
+      destroyPlayer();
       console.error('[player] scrape error:', e);
+      showToast('This source could not find a playable stream');
       return;
     }
   }
@@ -1446,7 +2006,7 @@ async function playVideo(url, title, lang) {
   } else {
     // Single quality or analysis failed — play directly
     console.log('[player] playing:', resolvedUrl.substring(0, 120));
-    try { await loadStream(video, resolvedUrl, title); } catch (e) { console.error('[player] loadStream error:', e); }
+    try { await loadStream(video, resolvedUrl, title, _activeMirrors); } catch (e) { console.error('[player] loadStream error:', e); }
     if (lo) lo.classList.add('hidden');
   }
 }
@@ -1459,7 +2019,7 @@ function showQualityPicker(qualities, title, loadingOverlay) {
 
   pickerList.innerHTML = qualities.map((q, i) => {
     const size = q.estimatedSize && q.estimatedSize !== 'Unknown' ? q.estimatedSize : '';
-    return `<button class="quality-pick-btn" data-idx="${i}"><span>${q.label || 'Auto'}</span>${size ? `<span class="qp-size">${size}</span>` : ''}</button>`;
+    return `<button class="quality-pick-btn" data-idx="${i}"><span>${formatQualityLabel(q)}</span>${size ? `<span class="qp-size">${size}</span>` : ''}</button>`;
   }).join('');
 
   pickerOverlay.classList.remove('hidden');
@@ -1470,7 +2030,7 @@ function showQualityPicker(qualities, title, loadingOverlay) {
     hideQualityPicker();
     const video = document.getElementById('modal-video-player');
     if (!video) return;
-    try { await loadStream(video, chosen.url, title); } catch (e) { console.error('[player] loadStream error:', e); }
+    try { await loadStream(video, chosen.url, title, qualityMirrors(chosen.url)); } catch (e) { console.error('[player] loadStream error:', e); }
     if (loadingOverlay) loadingOverlay.classList.add('hidden');
   }));
 
@@ -1511,7 +2071,7 @@ async function switchSource(sourceName, movie) {
   if (seasonsSection) seasonsSection.classList.add('hidden');
 
   let detailUrl;
-  if (source.isKawaiiAnime || source.isAnimeSource || ['KawaiiAnime', ...Object.keys({ 'luna-stream.me': 1, 'animex.one': 1, 'anilight.live': 1, 'anikototv.to': 1 })].includes(sourceName)) {
+  if (source.isKawaiiAnime || source.isAnimeSource || ['KawaiiAnime', ...Object.keys({ 'luna-stream.me': 1, 'animex.one': 1, 'anikototv.to': 1 })].includes(sourceName)) {
     detailUrl = await (async () => {
       try {
         const results = await fetchSourceItems(source, movie.title);
@@ -1974,6 +2534,10 @@ function initDownloadTabs() {
 }
 
 function initEventListeners() {
+  refreshProviderHealth();
+  try {
+    window.api.onProviderHealth((h) => { _providerHealth = h; });
+  } catch {}
   $$('.nav-link').forEach(link => link.addEventListener('click', e => {
     e.preventDefault();
     const sec = link.dataset.section;
@@ -1985,6 +2549,10 @@ function initEventListeners() {
   }));
   const heroWatch = $('#hero-watch');
   if (heroWatch) heroWatch.addEventListener('click', () => {
+    if (state.heroItems.length) openDetail(state.heroItems[state.heroIndex]);
+  });
+  const heroInfo = $('#hero-info-btn');
+  if (heroInfo) heroInfo.addEventListener('click', () => {
     if (state.heroItems.length) openDetail(state.heroItems[state.heroIndex]);
   });
   const prev = $('#slideshow-prev');

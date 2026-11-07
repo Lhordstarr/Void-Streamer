@@ -25,13 +25,12 @@ const TMDB_GENRES = {
 const TMDB_LANG = 'en-US';
 
 // TMDB-based source domains (listing/detail handled via TMDB API)
-const TMDB_SOURCE_DOMAINS = ['streamex.sh', 'moviepire.org', 'lunastream.watch', 'dulo.tv', 'lordflix.org', 'www.rivestream.app', '7reels.cc', 'youflex.top', 'screenscape.me'];
+const TMDB_SOURCE_DOMAINS = ['streamex.sh', 'moviepire.org', 'www.rivestream.app', '7reels.cc', 'abibli.com', 'peestream.in'];
 
 // Anime source domains (use AniList API for metadata)
 const ANIME_SOURCE_DOMAINS = {
   'luna-stream.me': { listingUrl: 'https://luna-stream.me', watchPattern: 'https://luna-stream.me/anime/info/{id}' },
   'animex.one': { listingUrl: 'https://animex.one', watchPattern: 'https://animex.one/watch/{id}' },
-  'anilight.live': { listingUrl: 'https://anilight.live', watchPattern: 'https://anilight.live/watch/{id}' },
   'anikototv.to': { listingUrl: 'https://anikototv.to/home', watchPattern: 'https://anikototv.to/watch/{slug}' }
 };
 
@@ -54,31 +53,49 @@ function getTmdbSourceBase(url) {
 const STREAMSX_SOURCES = [
   { name: 'StreameX', embed: 'https://play.xpass.top/e' },
   { name: 'VidCore', embed: 'https://vidcore.net' },
-  { name: 'VidSrc', embed: 'https://vsembed.ru/embed' },
-  { name: 'Videoasy', embed: 'https://player.videasy.net' },
-  { name: 'ZXC Stream', embed: 'https://www.zxcstream.xyz/player' },
-  { name: 'VidPlays', embed: 'https://vidplays.fun/embed' },
+  { name: 'VidFast', embed: 'https://vidfast.vc' },
 ];
 
 // Source-specific embedded server providers (used when source domain matches)
 const SOURCE_EMBED_PROVIDERS = {
   '7reels.cc': [
-    { name: 'VidEasy',  embed: 'https://player.videasy.net' },
-    { name: 'VidPlus',  embed: 'https://player.vidplus.to/embed' },
-    { name: 'VidCore',  embed: 'https://vidcore.net' },
-    { name: 'VidLink',  embed: 'https://vidlink.pro' },
-    { name: 'VidSrc0',  embed: 'https://vidsrc.mov/embed' },
-    { name: 'VidRock',  embed: 'https://vidrock.net' },
-    { name: 'VidNest',  embed: 'https://vidnest.fun' },
-    { name: 'VidUp',    embed: 'https://vidup.to' },
-    { name: 'Vidify',   embed: 'https://player.vidify.top/embed' },
-    { name: 'VidZee',   embed: 'https://player.vidzee.wtf/embed' },
-    { name: 'Strigil',  embed: 'https://strigil.cc/embed' },
-  ],
-  'screenscape.me': [
-    { name: 'ScreenScape', embed: '' }, // uses own player via embed URL
+    { name: 'VidCore', embed: 'https://vidcore.net' },
+    { name: 'VidFast', embed: 'https://vidfast.vc' },
   ],
 };
+
+// Abibli streams are resolved at play time from its search API rather than
+// from a conventional embed URL. This pseudo-URL carries everything needed.
+function buildAbibliStreamUrl(mediaType, title, year, tmdbId, season, episode) {
+  const params = new URLSearchParams({
+    type: mediaType,
+    title: title || '',
+    year: year || '',
+    tmdb: tmdbId || ''
+  });
+  if (mediaType === 'tv') {
+    params.set('season', season || 1);
+    params.set('episode', episode || 1);
+  }
+  return `abibli://stream?${params.toString()}`;
+}
+
+// PeeStream streams are resolved at play time from its streamdata API.
+// The API keys everything by TMDB id, so the pseudo-URL only needs the id.
+function buildPeestreamStreamUrl(mediaType, tmdbId, season, episode, title, year, imdbId) {
+  const params = new URLSearchParams({
+    type: mediaType,
+    tmdb: tmdbId || '',
+    title: title || '',
+    year: year || '',
+    imdb: imdbId || ''
+  });
+  if (mediaType === 'tv') {
+    params.set('season', season || 1);
+    params.set('episode', episode || 1);
+  }
+  return `peestream://stream?${params.toString()}`;
+}
 
 function buildStreamexStreamUrl(embed, mediaType, tmdbId, season, episode) {
   if (mediaType === 'movie') return `${embed}/movie/${tmdbId}`;
@@ -232,6 +249,8 @@ async function scrapeStreamexDetail(detailUrl) {
   let poster = '', title = '', description = '', backdrop = '', rating = '', seasons = 0;
   let genres = [], cast = [], related = [];
   title = data.title || data.name || '';
+  const year = (data.release_date || data.first_air_date || '').split('-')[0] || '';
+  const imdbId = data.imdb_id || (data.external_ids && data.external_ids.imdb_id) || '';
   description = data.overview || '';
   if (data.poster_path) poster = `${TMDB_IMG}${data.poster_path}`;
   if (data.backdrop_path) backdrop = `${TMDB_IMG_HD}${data.backdrop_path}`;
@@ -254,10 +273,18 @@ async function scrapeStreamexDetail(detailUrl) {
     link: ''
   }));
 
-  // Build source-specific primary watch URL for this source
+  // Per-source watch URL: each source resolves to ITS OWN stream so the
+  // quality ladder genuinely differs when you switch sources. For the named
+  // catalogs, VidFast embeds carry the widest ladder (up to 4K/1080p).
   function srcUrl(mType, tmdbId, s, e) {
+    if (baseDomain === 'abibli.com') {
+      return buildAbibliStreamUrl(mType, title, year, tmdbId, s, e);
+    }
+    if (baseDomain === 'peestream.in') {
+      return buildPeestreamStreamUrl(mType, tmdbId, s, e, title, year, imdbId);
+    }
     return buildSourceWatchUrl(baseUrl, domain, mType, tmdbId, s, e)
-      || buildStreamexStreamUrl(STREAMSX_SOURCES[0].embed, mType, tmdbId, s, e);
+      || buildStreamexStreamUrl('https://vidcore.net', mType, tmdbId, s, e);
   }
 
   if (mediaType === 'movie') {
@@ -299,6 +326,7 @@ async function scrapeStreamexDetail(detailUrl) {
         isMoviboxStream: true,
       });
     });
+
 
     return { success: true, downloads, poster, title, description, isMovie: true, backdrop, rating, genres, cast, related };
   }

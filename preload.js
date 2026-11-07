@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('api', {
   scrapeUrl:          (url, config) => ipcRenderer.invoke('scrape-url',            { url, config }),
   scrapeDetail:       (url, config) => ipcRenderer.invoke('scrape-detail',         { url, config }),
   scrapeMoviboxStream:(url)         => ipcRenderer.invoke('scrape-movibox-stream',  { url }),
+  resolveAbibliStream:(url)         => ipcRenderer.invoke('resolve-abibli-stream', { url }),
+  resolvePeestreamStream:(url)      => ipcRenderer.invoke('resolve-peestream-stream', { url }),
   scrapeSpa:          (url, jsCode) => ipcRenderer.invoke('scrape-spa',            { url, jsCode }),
   scrapeKawaiiVideo:  (url)         => ipcRenderer.invoke('scrape-kawaii-anime-video', { url }),
   scrapeAnimeSourceVideo: (url, lang) => ipcRenderer.invoke('scrape-anime-source-video', { url, lang }),
@@ -33,6 +35,11 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.removeAllListeners('download-done');
   },
   openExternal:       (url)         => ipcRenderer.send('open-external', url),
-  playLocalFile:      (path)        => ipcRenderer.invoke('play-local-file', path)
+  playLocalFile:      (path)        => ipcRenderer.invoke('play-local-file', path),
+  pickSubtitleFile:   ()            => ipcRenderer.invoke('pick-subtitle-file'),
+  fetchSubtitles:     (opts)        => ipcRenderer.invoke('fetch-subtitles', opts),
+  fetchSubtitleText:  (url)         => ipcRenderer.invoke('fetch-subtitle-text', { url }),
+  getProviderHealth:  ()            => ipcRenderer.invoke('get-provider-health'),
+  onProviderHealth:   (cb)          => { const fn = (e, d) => cb(d); ipcRenderer.on('provider-health', fn); return () => ipcRenderer.removeListener('provider-health', fn); }
 });
 

@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@0.14.17/dist/hls.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@^1/dist/hls.min.js"></script>
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; overflow-x: hidden; }
@@ -31,12 +31,19 @@
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      background: #0a0a0a;
+      background: #000000;
       transition: opacity 0.8s cubic-bezier(0.4, 0, 0.2, 1), visibility 0.8s;
     }
     #loading-screen.fade-out {
       opacity: 0;
       visibility: hidden;
+    }
+    #loading-gif {
+      width: min(92vmin, 920px);
+      height: auto;
+      max-height: 88vh;
+      object-fit: contain;
+      user-select: none;
     }
     #loading-gif {
       width: 360px;
@@ -823,6 +830,31 @@
       z-index: 5;
     }
     .video-loading-overlay.hidden { display: none; }
+    .control-group { position: relative; }
+    .subs-menu {
+      position: absolute; bottom: calc(100% + 12px); right: -6px; z-index: 40;
+      background: rgba(14, 14, 20, 0.97); border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 12px; padding: 6px; min-width: 210px; max-width: 300px;
+      max-height: 46vh; overflow-y: auto;
+      box-shadow: 0 12px 36px rgba(0,0,0,0.6);
+    }
+    .subs-menu.hidden { display: none; }
+    .subs-menu-item {
+      display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+      background: none; border: none; color: #e7e7ee; font: 500 13px Inter, sans-serif;
+      padding: 8px 10px; border-radius: 8px; cursor: pointer; white-space: nowrap;
+    }
+    .subs-menu-item:hover { background: rgba(255,255,255,0.12); }
+    .subs-menu-item.active::before { content: '✓'; font-weight: 700; color: #22c55e; }
+    .subs-menu-divider { height: 1px; background: rgba(255,255,255,0.12); margin: 5px 4px; }
+    .subs-btn .cc-letters {
+      font-family: Inter, -apple-system, sans-serif;
+      font-weight: 800; font-size: 11px; letter-spacing: 0.6px;
+      border: 1.8px solid currentColor; border-radius: 4.5px;
+      padding: 2.5px 4.5px; line-height: 1;
+    }
+    #subsBtn.active-subs { background: rgba(255,255,255,0.95); color: #111; border-color: rgba(255,255,255,0.9); }
+    #subsBtn.active-subs .cc-letters { border-color: #111; }
   </style>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -907,6 +939,14 @@
         </div>
       </div>
       <div class="hero-dots" id="slideshow-dots"></div>
+    </div>
+
+    <!-- Continue Watching -->
+    <div class="ranking-section hidden" id="home-continue-section">
+      <div class="ranking-header">
+        <h2 class="ranking-title"><span class="ranking-icon">⏱</span> Continue Watching</h2>
+      </div>
+      <div class="ranking-row" id="home-continue-row"></div>
     </div>
 
     <!-- Top 10 Trending (all sources combined) -->
@@ -1218,10 +1258,10 @@
           </div>
         </div>
 
-        <!-- Top-right cast button -->
+        <!-- Top-right fullscreen button -->
         <div class="top-controls">
-          <button class="icon-btn cast-btn" title="Cast">
-            <svg viewBox="0 0 24 24"><path d="M1 18v3h3c0-1.66-1.34-3-3-3zm0-4v2c2.76 0 5 2.24 5 5h2c0-3.87-3.13-7-7-7zm0-4v2c4.97 0 9 4.03 9 9h2c0-6.08-4.93-11-11-11zm20-7H3c-1.1 0-2 .9-2 2v3h2V5h18v14h-7v2h7c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z"/></svg>
+          <button class="icon-btn" id="fullscreenBtnTop" title="Fullscreen">
+            <svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
           </button>
         </div>
 
@@ -1260,14 +1300,12 @@
               <button class="icon-btn" id="cacheBtn" title="Save for offline">
                 <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
               </button>
-              <button class="icon-btn" id="subsBtn" title="Subtitles">
-                <svg viewBox="0 0 24 24"><path d="M19 4H5c-1.11 0-2 .9-2 2v12c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm-9 7H6v2h4v-2zm7 0h-4v2h4v-2z"/></svg>
+              <button class="icon-btn subs-btn" id="subsBtn" title="Subtitles">
+                <span class="cc-letters">CC</span>
               </button>
+              <div id="subsMenu" class="subs-menu hidden"></div>
               <button class="icon-btn" id="pipBtn" title="Picture in Picture">
                 <svg viewBox="0 0 24 24"><path d="M19 11h-8v6h8v-6zm4 8V5c0-1.1-.9-2-2-2H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2zm-2 0H3V5h18v14z"/></svg>
-              </button>
-              <button class="icon-btn" id="fullscreenBtn" title="Fullscreen">
-                <svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
               </button>
             </div>
           </div>

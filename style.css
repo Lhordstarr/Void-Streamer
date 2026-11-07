@@ -1,7 +1,7 @@
 :root {
   --bg: #000000;
-  --surface: #080a18;
-  --card: #0e1025;
+  --surface: #050505;
+  --card: #0a0a0a;
   --text: #f1f5f9;
   --text-dim: #94a3b8;
   --text-dimmer: #475569;
@@ -979,9 +979,9 @@ section.glow-border.glow-active::before {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 66px;
-  height: 66px;
-  background: rgba(18, 12, 12, 0.85);
+  width: 76px;
+  height: 76px;
+  background: rgba(255, 255, 255, 0.94);
   border-radius: 50%;
   border: none;
   cursor: pointer;
@@ -989,11 +989,14 @@ section.glow-border.glow-active::before {
   align-items: center;
   justify-content: center;
   z-index: 10;
-  transition: background 0.2s, transform 0.2s;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.55), 0 0 0 1px rgba(0,0,0,0.25);
+  transition: background 0.2s, transform 0.2s, box-shadow 0.2s;
 }
+.center-play-btn svg { fill: #111; width: 26px; height: 28px; margin-left: 3px; }
 .center-play-btn:hover {
-  background: rgba(28, 22, 22, 0.95);
-  transform: translate(-50%, -50%) scale(1.05);
+  background: #ffffff;
+  transform: translate(-50%, -50%) scale(1.07);
+  box-shadow: 0 10px 40px rgba(0,0,0,0.65), 0 0 24px rgba(255,255,255,0.25);
 }
 
 /* ── Bottom dashboard ── */
@@ -1002,12 +1005,12 @@ section.glow-border.glow-active::before {
   bottom: 0;
   left: 0;
   right: 0;
-  background: linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.4) 70%, transparent 100%);
-  padding: 50px 18px 15px 18px;
+  background: linear-gradient(to top, rgba(0,0,0,0.96) 0%, rgba(0,0,0,0.55) 60%, transparent 100%);
+  padding: 56px 20px 14px 20px;
   z-index: 9;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   opacity: 0;
   transition: opacity 0.3s;
   pointer-events: none;
@@ -1018,29 +1021,41 @@ section.glow-border.glow-active::before {
 /* ── Title text ── */
 .video-metadata-title {
   color: var(--ui-white);
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 700;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.4px;
   pointer-events: none;
+  text-shadow: 0 1px 8px rgba(0,0,0,0.8);
 }
 
 /* ── Timeline / progress bar ── */
 .timeline-container {
   width: 100%;
-  height: 4px;
-  background: rgba(255, 255, 255, 0.24);
-  border-radius: 2px;
+  height: 16px;
+  background: transparent;
+  border-radius: 8px;
   position: relative;
   cursor: pointer;
 }
-.timeline-progress {
-  height: 100%;
-  background: var(--ui-white);
-  border-radius: 2px;
+.timeline-container::before {
+  content: '';
   position: absolute;
-  top: 0;
+  left: 0; right: 0; top: 50%;
+  transform: translateY(-50%);
+  height: 5px;
+  background: rgba(255, 255, 255, 0.28);
+  border-radius: 3px;
+}
+.timeline-progress {
+  height: 5px;
+  background: linear-gradient(90deg, #ffffff, #dbe4ff);
+  border-radius: 3px;
+  position: absolute;
+  top: 50%;
   left: 0;
+  transform: translateY(-50%);
   pointer-events: none;
+  box-shadow: 0 0 8px rgba(255,255,255,0.45);
 }
 .timeline-scrubber {
   position: absolute;
@@ -1056,11 +1071,12 @@ section.glow-border.glow-active::before {
 }
 .timeline-scrubber::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 12px;
-  height: 12px;
+  width: 15px;
+  height: 15px;
   border-radius: 50%;
   background: #fff;
   cursor: pointer;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.7);
 }
 
 /* ── Control actions row ── */
@@ -1072,25 +1088,30 @@ section.glow-border.glow-active::before {
 .control-group {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 10px;
 }
 
 /* ── Icon buttons ── */
 .icon-btn {
-  background: none;
-  border: none;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 50%;
   cursor: pointer;
-  padding: 4px;
+  padding: 6px;
+  width: 38px;
+  height: 38px;
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--ui-white);
-  transition: opacity 0.2s;
+  transition: background 0.2s, transform 0.15s, opacity 0.2s;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
 }
-.icon-btn:hover { opacity: 0.8; }
+.icon-btn:hover { background: rgba(255,255,255,0.18); transform: translateY(-1px); }
 .icon-btn svg {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   fill: currentColor;
 }
 
@@ -1127,6 +1148,33 @@ section.glow-border.glow-active::before {
   letter-spacing: 0.5px;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  text-shadow: 0 1px 6px rgba(0,0,0,0.8);
+}
+
+/* ── Provider health dot ── */
+.src-dot {
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+  background: rgba(255,255,255,0.3);
+}
+.src-dot.dot-ok { background: #22c55e; box-shadow: 0 0 6px rgba(34,197,94,0.8); }
+.src-dot.dot-err { background: #ef4444; box-shadow: 0 0 6px rgba(239,68,68,0.8); }
+.src-dot.dot-unknown { background: rgba(255,255,255,0.3); }
+
+/* ── Continue Watching progress bar ── */
+.cw-progress {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  height: 4px; background: rgba(255,255,255,0.18);
+  border-radius: 0 0 8px 8px; overflow: hidden;
+}
+.cw-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #10b981, #22d3ee);
+  border-radius: 2px;
 }
 
 /* ── Quality picker overlay ── */
@@ -1227,11 +1275,16 @@ section.glow-border.glow-active::before {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  background: rgba(0,0,0,0.5);
+  gap: 14px;
+  background: rgba(0,0,0,0.62);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
   z-index: 15;
-  color: rgba(255,255,255,0.8);
-  font-size: 13px;
+  color: rgba(255,255,255,0.92);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-shadow: 0 1px 8px rgba(0,0,0,0.9);
 }
 .video-loading-overlay.hidden { display: none; }
 
@@ -1923,4 +1976,33 @@ section.glow-border.glow-active::before {
   .source-chips { gap: 6px; }
   .source-chip { padding: 6px 12px; font-size: 12px; }
   .video-close-btn { left: 8px; top: 8px; width: 30px; height: 30px; }
+}
+
+/* ─── Phone / small-window scaling ─── */
+@media (max-width: 760px) {
+  html { font-size: 12.5px; }
+  .hero { padding: 18px 14px 44px; }
+  .hero-title { font-size: 22px; }
+  .hero-desc { font-size: 12.5px; -webkit-line-clamp: 3; }
+  .hero-btns { gap: 8px; }
+  .btn-hero-circle { width: 38px; height: 38px; }
+  .ranking-section, .content-section { padding: 0 0 20px; }
+  .ranking-title, .section-title { font-size: 15px; }
+  .section-subtitle { font-size: 11px; }
+  .nav { padding: 0 10px; }
+  .search-bar-input, .filter-select { width: 100%; font-size: 13px; }
+  .detail-hero-section, .detail-download-section,
+  .detail-seasons-section, .detail-cast-section, .detail-related-section { padding-left: 14px; padding-right: 14px; }
+  .season-grid, .cast-row, .related-grid { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
+  .control-actions-row { gap: 4px; }
+  .icon-btn { width: 34px; height: 34px; }
+  .time-counter { font-size: 11px; }
+  .subs-menu { right: 6px; min-width: 170px; }
+  .ranking-row { gap: 10px; }
+}
+@media (max-width: 480px) {
+  html { font-size: 12px; }
+  .hero-title { font-size: 18px; }
+  .season-grid, .cast-row, .related-grid { grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); }
+  .episode-card { flex-direction: row; }
 }
