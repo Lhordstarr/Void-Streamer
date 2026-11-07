@@ -1,0 +1,10 @@
+name = "void-streamer"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# Optional: deploy to a custom route/domain
+# routes = [{ pattern = "voidstreamer.example.com/*", zone_name = "example.com" }]

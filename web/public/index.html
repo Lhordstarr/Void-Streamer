@@ -1,0 +1,1381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Void Streamer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@^1/dist/hls.min.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; overflow-x: hidden; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #000;
+      color: #f1f5f9;
+      -webkit-font-smoothing: antialiased;
+    }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+
+    /* ─── LOADING SCREEN ─── */
+    #loading-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 99999;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #000000;
+      transition: opacity 0.8s cubic-bezier(0.4, 0, 0.2, 1), visibility 0.8s;
+    }
+    #loading-screen.fade-out {
+      opacity: 0;
+      visibility: hidden;
+    }
+    #loading-gif {
+      width: min(92vmin, 920px);
+      height: auto;
+      max-height: 88vh;
+      object-fit: contain;
+      user-select: none;
+    }
+    #loading-gif {
+      width: 360px;
+      height: 360px;
+      object-fit: contain;
+      margin-bottom: 32px;
+    }
+    #loading-bar-wrap {
+      width: 200px;
+      height: 3px;
+      background: rgba(255,255,255,0.08);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    #loading-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #10b981, #06b6d4, #d946ef, #10b981);
+      background-size: 300% 100%;
+      border-radius: 2px;
+      transition: width 0.3s ease;
+      animation: dl-rainbow 2s linear infinite;
+    }
+    @keyframes dl-rainbow { 0% { background-position: 0% 0%; } 100% { background-position: 300% 0%; } }
+
+    /* ─── NAV ─── */
+
+    .topnav {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 100;
+    }
+    .topnav-inner {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      background: rgba(30,30,30,0.6);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-radius: 50px;
+      border: 1px solid rgba(255,255,255,0.1);
+      padding: 6px 8px;
+    }
+    .nav-link {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 16px;
+      border-radius: 50px;
+      color: rgba(255,255,255,0.6);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
+      transition: all 0.2s;
+      position: relative;
+      cursor: pointer;
+      overflow: hidden;
+    }
+    .nav-link:hover { color: #fff; background: rgba(255,255,255,0.08); }
+    .nav-link.active { color: #fff; background: rgba(255,255,255,0.1); }
+    .nav-link.active::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: 50px;
+      padding: 1.5px;
+      background: linear-gradient(90deg, #10b981, #ffffff, #d946ef, #ffffff, #10b981);
+      background-size: 300% 100%;
+      animation: neon-stream var(--flow-duration) linear infinite;
+      -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      -webkit-mask-composite: xor;
+      mask-composite: exclude;
+      pointer-events: none;
+    }
+    .nav-link .nav-icon { display: flex; align-items: center; font-size: 15px; }
+    .nav-link .nav-icon svg { width: 16px; height: 16px; }
+    .nav-spacer { width: 4px; }
+    .nav-badge {
+      background: #e50914;
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 10px;
+      margin-left: 4px;
+    }
+    .nav-badge.hidden { display: none; }
+    .nav-underline { display: none; }
+
+    /* ─── MAIN CONTENT ─── */
+    .main-content { width: 100%; min-height: 100vh; }
+
+    /* ─── HERO ─── */
+    .hero {
+      position: relative;
+      width: 100%;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      align-items: flex-end;
+    }
+    .hero-loading {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      z-index: 5;
+    }
+    .hero-bg {
+      position: absolute; inset: 0;
+      background-size: cover;
+      background-position: center top;
+      transition: background-image 0.8s ease;
+    }
+    .slideshow-track { display: none; }
+    .hero-gradient-bottom {
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 60%;
+      background: linear-gradient(to top, #000 0%, rgba(0,0,0,0.8) 30%, transparent 100%);
+      z-index: 2;
+    }
+    .hero-gradient-sides {
+      position: absolute; inset: 0;
+      background: linear-gradient(to right, rgba(20,20,20,0.85) 0%, rgba(20,20,20,0.3) 40%, transparent 60%);
+      z-index: 2;
+    }
+    .hero-content {
+      position: relative;
+      z-index: 3;
+      padding: 0 60px 80px;
+      max-width: 650px;
+    }
+    .hero-pills {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    .hero-pills .meta-pill,
+    .meta-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 5px 12px;
+      background: rgba(30,30,30,0.6);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 50px;
+      font-size: 12px;
+      font-weight: 500;
+      color: rgba(255,255,255,0.85);
+    }
+    .meta-pill svg { width: 13px; height: 13px; flex-shrink: 0; }
+    .meta-pill.hidden { display: none; }
+    .hero-title {
+      font-size: 62px;
+      font-weight: 900;
+      line-height: 1.05;
+      color: #fff;
+      text-shadow: 0 4px 30px rgba(0,0,0,0.6);
+      margin-bottom: 14px;
+      letter-spacing: -1.5px;
+    }
+    .hero-desc {
+      font-size: 15px;
+      line-height: 1.6;
+      color: rgba(255,255,255,0.7);
+      max-width: 500px;
+      margin-bottom: 24px;
+    }
+    .hero-btns {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .btn-watch {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 32px;
+      background: rgba(255, 255, 255, 0.08);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 50px;
+      color: #fff;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-watch:hover { background: rgba(255, 255, 255, 0.12); transform: scale(1.03); box-shadow: 0 0 15px rgba(255,255,255,0.1), 0 0 30px rgba(255,255,255,0.15); }
+    .btn-watch svg { width: 16px; height: 16px; }
+    .btn-hero-circle {
+      width: 42px; height: 42px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(255, 255, 255, 0.08);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 50%;
+      color: #fff;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-size: 18px;
+    }
+    .btn-hero-circle:hover { background: rgba(255, 255, 255, 0.12); box-shadow: 0 0 15px rgba(255,255,255,0.1), 0 0 30px rgba(255,255,255,0.15); }
+    .hero-arrow { display: none !important; }
+    .hero-dots {
+      position: absolute;
+      bottom: 40px;
+      right: 60px;
+      z-index: 4;
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .hero-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.3);
+      border: none;
+      cursor: pointer;
+      transition: all 0.3s;
+      padding: 0;
+    }
+    .hero-dot.active {
+      width: 24px;
+      border-radius: 4px;
+      background: #fff;
+    }
+
+    /* ─── CONTENT ROWS ─── */
+    .ranking-section,
+    .content-section {
+      padding: 20px 0 10px;
+    }
+    .ranking-header,
+    .section-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 60px;
+      margin-bottom: 16px;
+    }
+    .ranking-title,
+    .section-title {
+      font-size: 20px;
+      font-weight: 700;
+      color: #fff;
+    }
+    .section-title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .section-accent {
+      width: 4px;
+      height: 22px;
+      background: var(--accent, #ffffff);
+      border-radius: 2px;
+    }
+    .section-subtitle {
+      font-size: 13px;
+      color: rgba(255,255,255,0.4);
+      margin-left: auto;
+    }
+    .ranking-arrows {
+      display: flex;
+      gap: 6px;
+      margin-left: auto;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+    .ranking-section:hover .ranking-arrows { opacity: 1; }
+    .ranking-arrow {
+      width: 32px; height: 32px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(255,255,255,0.08);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 50%;
+      color: #fff;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .ranking-arrow:hover { background: rgba(255,255,255,0.18); }
+    .ranking-arrow svg { width: 16px; height: 16px; }
+    .ranking-row {
+      display: flex;
+      gap: 12px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding: 0 60px 20px;
+      scroll-behavior: smooth;
+      scrollbar-width: none;
+    }
+    .ranking-row::-webkit-scrollbar { display: none; }
+    #search-section {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    .content-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 16px;
+      padding: 0 60px 30px;
+    }
+
+    /* ─── CARDS ─── */
+    .card, .ranking-card {
+      position: relative;
+      border-radius: 10px;
+      overflow: hidden;
+      cursor: pointer;
+      transition: transform 0.25s, box-shadow 0.25s;
+      flex-shrink: 0;
+      background: #1a1a1a;
+    }
+    .card:hover, .ranking-card:hover {
+      transform: scale(1.05);
+      box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+      z-index: 2;
+    }
+    .ranking-card { width: 160px; }
+    .card img, .ranking-card img {
+      width: 100%;
+      aspect-ratio: 2/3;
+      object-fit: cover;
+      display: block;
+    }
+    .card .card-title,
+    .ranking-card .card-title {
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      padding: 30px 10px 10px;
+      background: linear-gradient(to top, rgba(0,0,0,0.9) 0%, transparent 100%);
+      font-size: 13px;
+      font-weight: 600;
+      color: #fff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .ranking-num {
+      position: absolute;
+      top: 6px;
+      left: 8px;
+      font-size: 28px;
+      font-weight: 900;
+      color: rgba(255,255,255,0.15);
+      line-height: 1;
+      text-shadow: 0 2px 8px rgba(0,0,0,0.6);
+      z-index: 1;
+    }
+
+    /* ─── PAGE SECTIONS ─── */
+    section.hidden { display: none !important; }
+    .page-back-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255,255,255,0.08);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 50px;
+      color: #fff;
+      padding: 8px 18px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      flex-shrink: 0;
+    }
+    .page-back-btn:hover { background: rgba(255,255,255,0.12); }
+    .page-back-btn svg { width: 16px; height: 16px; }
+
+    /* ─── FULLSCREEN STATES ─── */
+    .fullscreen-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 80px 20px;
+      text-align: center;
+      color: rgba(255,255,255,0.4);
+    }
+    .fullscreen-state.hidden { display: none; }
+    .fullscreen-state h3 { font-size: 18px; color: rgba(255,255,255,0.6); margin: 16px 0 6px; }
+    .fullscreen-state p { font-size: 14px; }
+
+    /* ─── SPINNER ─── */
+    .spinner-ring {
+      width: 40px; height: 40px;
+      border: 3px solid rgba(255,255,255,0.1);
+      border-top-color: var(--accent, #ffffff);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    .spinner-sm {
+      width: 20px; height: 20px;
+      border: 2px solid rgba(255,255,255,0.1);
+      border-top-color: var(--accent, #ffffff);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ─── SEARCH ─── */
+    .search-hero {
+      padding: 100px 60px 30px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .search-form {
+      position: relative;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex: 1;
+      max-width: 600px;
+      background: rgba(255, 255, 255, 0.06);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 50px;
+      padding: 4px 6px 4px 20px;
+    }
+    .search-form-icon { color: rgba(255,255,255,0.4); flex-shrink: 0; }
+    .search-form input[type="search"] {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: #fff;
+      font-size: 15px;
+      padding: 10px 0;
+      font-family: inherit;
+    }
+    .search-form input::placeholder { color: rgba(255,255,255,0.35); }
+    .search-form-submit {
+      padding: 8px 20px;
+      background: var(--accent, #ffffff);
+      color: #fff;
+      border: none;
+      border-radius: 50px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    .search-form-submit:hover { opacity: 0.85; }
+    .search-suggestions {
+      position: absolute;
+      background: rgba(30,30,30,0.95);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 16px;
+      overflow: hidden;
+      z-index: 9999;
+    }
+    .search-suggestions.hidden { display: none; }
+    .filter-select {
+      background: rgba(30,30,30,0.6);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px;
+      color: #fff;
+      padding: 8px 12px;
+      font-size: 13px;
+      font-family: inherit;
+      cursor: pointer;
+      margin-left: auto;
+    }
+    .filter-select option { background: #1a1a1a; }
+    .search-progress-wrap {
+      width: 300px;
+      height: 4px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 2px;
+      margin-top: 16px;
+      overflow: hidden;
+    }
+    .progress-bar-inner {
+      height: 100%;
+      background: linear-gradient(90deg, #10b981, #06b6d4, #d946ef, #10b981);
+      background-size: 300% 100%;
+      border-radius: 2px;
+      width: 0%;
+      transition: width 0.3s;
+      animation: dl-rainbow 2s linear infinite;
+    }
+    .scrape-log {
+      margin-top: 12px;
+      font-size: 12px;
+      color: rgba(255,255,255,0.3);
+      max-height: 100px;
+      overflow-y: auto;
+    }
+
+    /* ─── DETAIL PAGE ─── */
+    .detail-hero {
+      position: relative;
+      width: 100%;
+      height: 55vh;
+      min-height: 360px;
+      overflow: hidden;
+    }
+    .detail-hero-backdrop {
+      position: absolute; inset: 0;
+      background-size: cover;
+      background-position: center top;
+    }
+    .detail-hero-gradient {
+      position: absolute; inset: 0;
+      background: linear-gradient(to top, #000 0%, rgba(0,0,0,0.6) 40%, transparent 70%),
+                  linear-gradient(to right, rgba(0,0,0,0.6) 0%, transparent 50%);
+    }
+    .detail-back-btn {
+      position: absolute;
+      top: 20px; left: 20px;
+      z-index: 200;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255,255,255,0.08);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 50px;
+      color: #fff;
+      padding: 8px 18px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .detail-back-btn:hover { background: rgba(255,255,255,0.12); }
+    .detail-back-btn svg { width: 16px; height: 16px; }
+    .detail-info-card {
+      position: relative;
+      z-index: 3;
+      display: flex;
+      gap: 30px;
+      padding: 0 60px;
+      margin-top: -120px;
+    }
+    .detail-poster-col { flex-shrink: 0; }
+    .detail-poster {
+      width: 200px;
+      border-radius: 12px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+    }
+    .detail-poster-placeholder {
+      width: 200px;
+      aspect-ratio: 2/3;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: rgba(255,255,255,0.2);
+    }
+    .detail-poster-placeholder.hidden { display: none; }
+    .detail-info-col { padding-top: 20px; }
+    .detail-title {
+      font-size: 36px;
+      font-weight: 800;
+      color: #fff;
+      margin-bottom: 14px;
+    }
+    .detail-meta-pills {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    .meta-pill-accent {
+      background: rgba(255,255,255,0.2) !important;
+      border-color: rgba(255,255,255,0.3) !important;
+      color: var(--accent, #ffffff) !important;
+    }
+    .detail-watch-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 32px;
+      background: var(--accent, #ffffff);
+      color: #fff;
+      border: none;
+      border-radius: 50px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+      margin-bottom: 24px;
+    }
+    .detail-watch-btn:hover { opacity: 0.85; transform: scale(1.02); }
+    .detail-watch-btn svg { width: 16px; height: 16px; }
+    .detail-section-heading {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 16px;
+      font-weight: 700;
+      color: rgba(255,255,255,0.8);
+      margin-bottom: 12px;
+    }
+    .detail-section-heading svg { width: 18px; height: 18px; color: var(--accent, #ffffff); }
+    .detail-description {
+      font-size: 14px;
+      line-height: 1.7;
+      color: rgba(255,255,255,0.6);
+      max-width: 600px;
+      margin-bottom: 24px;
+    }
+    .source-chips {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+
+    /* ─── SEASONS / EPISODES ─── */
+    .detail-seasons-section,
+    .detail-cast-section,
+    .detail-related-section {
+      padding: 20px 60px;
+    }
+    .detail-seasons-section.hidden,
+    .detail-cast-section.hidden,
+    .detail-related-section.hidden { display: none; }
+    .detail-seasons-list {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    .detail-episodes-grid,
+    .detail-cast-list,
+    .detail-related-grid {
+      display: flex;
+      gap: 12px;
+      overflow-x: auto;
+      padding-bottom: 10px;
+    }
+
+    /* ─── DOWNLOAD SECTION ─── */
+    .detail-bottom { padding: 20px 60px 60px; }
+    .download-section {
+      background: rgba(30,30,30,0.6);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 16px;
+      padding: 24px;
+    }
+    .download-section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .download-section-header h3 {
+      font-size: 16px;
+      font-weight: 700;
+      color: #fff;
+    }
+    .btn-refetch {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 50%;
+      width: 30px; height: 30px;
+      display: flex; align-items: center; justify-content: center;
+      color: #fff;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-refetch:hover { background: rgba(255,255,255,0.15); }
+    .dl-status {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px;
+      color: rgba(255,255,255,0.5);
+      font-size: 14px;
+    }
+    .dl-status.hidden { display: none; }
+    .dl-error { color: #ef4444; }
+    .dl-status.hidden { display: none; }
+
+    /* ─── DOWNLOADS PAGE ─── */
+    .dl-page-header {
+      padding: 80px 60px 20px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .dl-page-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .dl-page-tabs {
+      display: flex;
+      gap: 4px;
+      margin-left: auto;
+      background: rgba(30,30,30,0.6);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 50px;
+      padding: 4px;
+    }
+    .dl-tab {
+      padding: 8px 18px;
+      border-radius: 50px;
+      border: none;
+      background: transparent;
+      color: rgba(255,255,255,0.5);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-family: inherit;
+    }
+    .dl-tab.active {
+      background: rgba(255,255,255,0.12);
+      color: #fff;
+    }
+    .dl-tab-count {
+      font-size: 11px;
+      opacity: 0.6;
+    }
+    .dl-tab-content { padding: 0 60px 40px; }
+    .dl-tab-content.hidden { display: none; }
+    .dl-active-list,
+    .dl-completed-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    /* ─── VIDEO PLAYER MODAL ─── */
+    #modal-video-container {
+      position: fixed;
+      inset: 0;
+      z-index: 200;
+      background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #modal-video-container.hidden { display: none; }
+    .player-wrapper {
+      width: 100%;
+      height: 100%;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .video-loading-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      background: rgba(0,0,0,0.6);
+      border-radius: 12px;
+      color: #fff;
+      font-size: 14px;
+      z-index: 5;
+    }
+    .video-loading-overlay.hidden { display: none; }
+    .control-group { position: relative; }
+    .subs-menu {
+      position: absolute; bottom: calc(100% + 12px); right: -6px; z-index: 40;
+      background: rgba(14, 14, 20, 0.97); border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 12px; padding: 6px; min-width: 210px; max-width: 300px;
+      max-height: 46vh; overflow-y: auto;
+      box-shadow: 0 12px 36px rgba(0,0,0,0.6);
+    }
+    .subs-menu.hidden { display: none; }
+    .subs-menu-item {
+      display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+      background: none; border: none; color: #e7e7ee; font: 500 13px Inter, sans-serif;
+      padding: 8px 10px; border-radius: 8px; cursor: pointer; white-space: nowrap;
+    }
+    .subs-menu-item:hover { background: rgba(255,255,255,0.12); }
+    .subs-menu-item.active::before { content: '✓'; font-weight: 700; color: #22c55e; }
+    .subs-menu-divider { height: 1px; background: rgba(255,255,255,0.12); margin: 5px 4px; }
+    .subs-btn .cc-letters {
+      font-family: Inter, -apple-system, sans-serif;
+      font-weight: 800; font-size: 11px; letter-spacing: 0.6px;
+      border: 1.8px solid currentColor; border-radius: 4.5px;
+      padding: 2.5px 4.5px; line-height: 1;
+    }
+    #subsBtn.active-subs { background: rgba(255,255,255,0.95); color: #111; border-color: rgba(255,255,255,0.9); }
+    #subsBtn.active-subs .cc-letters { border-color: #111; }
+  </style>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="loading-screen">
+  <img id="loading-gif" src="25.gif" alt="" draggable="false">
+</div>
+
+<!-- LOGO (outside pill) -->
+
+
+<!-- ═══════════════════ TOP NAV ═══════════════════ -->
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-link active" data-section="home" id="btn-home-nav">
+      <span class="nav-icon">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8.707 1.5a1 1 0 0 0-1.414 0L.646 8.146a.5.5 0 0 0 .708.708L2 8.207V13.5A1.5 1.5 0 0 0 3.5 15h9a1.5 1.5 0 0 0 1.5-1.5V8.207l.646.647a.5.5 0 0 0 .708-.708L13 5.793V2.5a.5.5 0 0 0-.5-.5h-1a.5.5 0 0 0-.5.5v1.293zM13 7.207V13.5a.5.5 0 0 1-.5.5h-9a.5.5 0 0 1-.5-.5V7.207l5-5z"/></svg>
+      </span>
+      <span class="nav-label">Home</span>
+    </a>
+    <a class="nav-link" data-section="movies" id="btn-movies-nav">
+      <span class="nav-icon">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M0 1a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H1a1 1 0 0 1-1-1zm4 0v6h8V1zm8 8H4v6h8zM1 1v2h2V1zm2 3H1v2h2zM1 7v2h2V7zm2 3H1v2h2zm-2 3v2h2v-2zM15 1h-2v2h2zm-2 3v2h2V4zm2 3h-2v2h2zm-2 3v2h2v-2zm2 3h-2v2h2z"/></svg>
+      </span>
+      <span class="nav-label">Movies</span>
+    </a>
+    <a class="nav-link" data-section="tv" id="btn-tv-nav">
+      <span class="nav-icon">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M2.5 13.5A.5.5 0 0 1 3 13h10a.5.5 0 0 1 0 1H3a.5.5 0 0 1-.5-.5M13.991 3l.024.001a1.5 1.5 0 0 1 .538.143.76.76 0 0 1 .302.254c.067.1.145.277.145.602v5.991l-.001.024a1.5 1.5 0 0 1-.143.538.76.76 0 0 1-.254.302c-.1.067-.277.145-.602.145H2.009l-.024-.001a1.5 1.5 0 0 1-.538-.143.76.76 0 0 1-.302-.254C1.078 10.502 1 10.325 1 10V4.009l.001-.024a1.5 1.5 0 0 1 .143-.538.76.76 0 0 1 .254-.302C1.498 3.078 1.675 3 2 3zM14 2H2C0 2 0 4 0 4v6c0 2 2 2 2 2h12c2 0 2-2 2-2V4c0-2-2-2-2-2"/></svg>
+      </span>
+      <span class="nav-label">Shows</span>
+    </a>
+    <div class="nav-spacer"></div>
+    <a class="nav-link" data-section="search" id="btn-search-nav">
+      <span class="nav-icon">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001q.044.06.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1 1 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0"/></svg>
+      </span>
+      <span class="nav-label">Search</span>
+    </a>
+    <a class="nav-link" data-section="downloads" id="btn-downloads-nav">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      </span>
+      <span class="nav-label">Downloads</span>
+      <span class="nav-badge hidden" id="nav-download-badge">0</span>
+    </a>
+  </div>
+</nav>
+
+<!-- ═══════════════════ MAIN CONTENT ═══════════════════ -->
+<main class="main-content" id="content-area">
+
+  <!-- ─── HOME SECTION ─── -->
+  <section id="home-section" class="glow-border">
+    <div class="hero" id="hero">
+      <div id="movies-loading-home" class="hero-loading">
+        <div class="spinner-ring"></div>
+      </div>
+      <div class="hero-bg" id="hero-bg"></div>
+      <div class="slideshow-track" id="slideshow-track"></div>
+      <div class="hero-gradient-bottom"></div>
+      <div class="hero-gradient-sides"></div>
+      <div class="hero-content" id="hero-content">
+        <div class="hero-pills" id="hero-pills"></div>
+        <h2 class="hero-title" id="hero-title"></h2>
+        <p class="hero-desc" id="hero-desc"></p>
+        <div class="hero-btns">
+          <button class="btn-watch" id="hero-watch">
+            <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            <span>Play</span>
+          </button>
+          <button class="btn-hero-circle" id="hero-info-btn" title="More Info">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="hero-dots" id="slideshow-dots"></div>
+    </div>
+
+    <!-- Continue Watching -->
+    <div class="ranking-section hidden" id="home-continue-section">
+      <div class="ranking-header">
+        <h2 class="ranking-title"><span class="ranking-icon">⏱</span> Continue Watching</h2>
+      </div>
+      <div class="ranking-row" id="home-continue-row"></div>
+    </div>
+
+    <!-- Top 10 Trending (all sources combined) -->
+    <div class="ranking-section" id="home-trending-section">
+      <div class="ranking-header">
+        <h2 class="ranking-title"><span class="ranking-icon fire">🔥</span> Top 10 Trending</h2>
+        <div class="ranking-arrows">
+          <button class="ranking-arrow" data-scroll="left" data-target="home-trending-row">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+          <button class="ranking-arrow" data-scroll="right" data-target="home-trending-row">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="ranking-row" id="home-trending-row"></div>
+    </div>
+
+    <!-- Top TV Series -->
+    <div class="ranking-section" id="home-tv-section">
+      <div class="ranking-header">
+        <h2 class="ranking-title"><span class="ranking-icon">📺</span> Top TV Series</h2>
+        <div class="ranking-arrows">
+          <button class="ranking-arrow" data-scroll="left" data-target="home-tv-row">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+          <button class="ranking-arrow" data-scroll="right" data-target="home-tv-row">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="ranking-row" id="home-tv-row"></div>
+    </div>
+
+    <!-- Source-specific Top 10 rows (populated dynamically) -->
+    <div id="home-source-rows"></div>
+
+    <!-- Top Anime Series -->
+    <div class="ranking-section" id="home-anime-section" style="display:none">
+      <div class="ranking-header">
+        <h2 class="ranking-title"><span class="ranking-icon">⚡</span> Top Anime Series</h2>
+        <div class="ranking-arrows">
+          <button class="ranking-arrow" data-scroll="left" data-target="home-anime-row">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+          <button class="ranking-arrow" data-scroll="right" data-target="home-anime-row">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="ranking-row" id="home-anime-row"></div>
+    </div>
+  </section>
+
+  <!-- ─── MOVIES SECTION ─── -->
+  <section id="movies-section" class="hidden glow-border">
+    <div class="section-header" style="padding-top:80px;">
+      <button class="page-back-btn" data-section="home">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="18" height="18"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <div class="section-title-wrap">
+        <div class="section-accent"></div>
+        <h2 class="section-title">Movies</h2>
+      </div>
+      <p class="section-subtitle" id="movies-source-count"></p>
+    </div>
+    <div id="movies-loading" class="fullscreen-state hidden">
+      <div class="spinner-ring"></div>
+      <p>Loading Movies...</p>
+    </div>
+    <div id="movies-empty" class="fullscreen-state hidden">
+      <h3>No Active Sources</h3>
+      <p>Go to Settings to configure sources.</p>
+    </div>
+    <div id="movies-content" class="hidden">
+      <div id="movies-grid" class="content-grid"></div>
+    </div>
+  </section>
+
+  <!-- ─── TV SECTION ─── -->
+  <section id="tv-section" class="hidden glow-border">
+    <div class="section-header" style="padding-top:80px;">
+      <button class="page-back-btn" data-section="home">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="18" height="18"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <div class="section-title-wrap">
+        <div class="section-accent"></div>
+        <h2 class="section-title">TV Shows</h2>
+      </div>
+      <p class="section-subtitle" id="tv-source-count"></p>
+    </div>
+    <div id="tv-loading" class="fullscreen-state hidden">
+      <div class="spinner-ring"></div>
+      <p>Loading TV Shows...</p>
+    </div>
+    <div id="tv-empty" class="fullscreen-state hidden">
+      <h3>No Active Sources</h3>
+      <p>Go to Settings to configure sources.</p>
+    </div>
+    <div id="tv-content" class="hidden">
+      <div id="tv-grid" class="content-grid"></div>
+    </div>
+  </section>
+
+  <!-- ─── ANIME SECTION ─── -->
+  <section id="anime-section" class="hidden glow-border" style="display:none">
+    <div class="section-header" style="padding-top:80px;">
+      <button class="page-back-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="18" height="18"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <div class="section-title-wrap">
+        <div class="section-accent"></div>
+        <h2 class="section-title">Anime</h2>
+      </div>
+      <p class="section-subtitle" id="anime-source-count"></p>
+    </div>
+    <div id="anime-loading" class="fullscreen-state hidden">
+      <div class="spinner-ring"></div>
+      <p>Loading Anime...</p>
+    </div>
+    <div id="anime-empty" class="fullscreen-state hidden">
+      <h3>No Active Sources</h3>
+      <p>Go to Settings to configure sources.</p>
+    </div>
+    <div id="anime-content" class="hidden">
+      <div id="anime-grid" class="content-grid"></div>
+    </div>
+  </section>
+
+  <!-- ─── DOWNLOADS SECTION ─── -->
+  <section id="downloads-section" class="hidden glow-border">
+    <div class="dl-page-header">
+      <div class="dl-page-left">
+        <button class="page-back-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="18" height="18"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <div class="section-title-wrap">
+          <div class="section-accent"></div>
+          <h2 class="section-title">Downloads</h2>
+        </div>
+      </div>
+      <div class="dl-page-tabs">
+        <button class="dl-tab active" data-tab="active">Active <span class="dl-tab-count" id="dl-active-count">0</span></button>
+        <button class="dl-tab" data-tab="completed">Completed <span class="dl-tab-count" id="dl-completed-count">0</span></button>
+        <button class="dl-tab" data-tab="cached">Cached <span class="dl-tab-count" id="dl-cached-count">0</span></button>
+      </div>
+    </div>
+
+    <!-- Active Tab -->
+    <div class="dl-tab-content" id="dl-tab-active">
+      <div id="dl-active-empty" class="fullscreen-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" width="48" height="48">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        <h3>No Active Downloads</h3>
+        <p>Downloads in progress will appear here.</p>
+      </div>
+      <div id="dl-active-list" class="dl-active-list"></div>
+    </div>
+
+    <!-- Completed Tab -->
+    <div class="dl-tab-content hidden" id="dl-tab-completed">
+      <div id="dl-completed-empty" class="fullscreen-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" width="48" height="48">
+          <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+          <polyline points="22 4 12 14.01 9 11.01"/>
+        </svg>
+        <h3>No Completed Downloads</h3>
+        <p>Finished downloads will appear here.</p>
+      </div>
+      <div id="dl-completed-list" class="dl-completed-list"></div>
+    </div>
+
+    <!-- Cached Tab -->
+    <div class="dl-tab-content hidden" id="dl-tab-cached">
+      <div class="cache-settings-row">
+        <label class="cache-toggle" title="When off, videos only cache when you tap the Save button in the player">
+          <input type="checkbox" id="cache-enabled-toggle">
+          <span class="cache-toggle-track"><span class="cache-toggle-thumb"></span></span>
+          <span class="cache-toggle-label">Cache videos for offline automatically</span>
+        </label>
+      </div>
+      <div class="cache-settings-hint">Caching continues in the background even after you stop watching.</div>
+      <div id="dl-caching-list" class="dl-completed-list"></div>
+      <div id="dl-cached-empty" class="fullscreen-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" width="48" height="48">
+          <path d="M19 8H5v12h14V8zm0-2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2zm-7 12V6"/>
+        </svg>
+        <h3>No Cached Videos</h3>
+        <p>Videos you watch are cached in the background. Save them here for offline viewing.</p>
+      </div>
+      <div id="dl-cached-list" class="dl-completed-list"></div>
+    </div>
+  </section>
+
+  <!-- ─── SEARCH SECTION ─── -->
+  <section id="search-section" class="hidden glow-border">
+    <div class="search-hero">
+      <button class="page-back-btn search-back-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="18" height="18"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <form id="search-form" class="search-form">
+        <svg class="search-form-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input type="search" id="search-input" placeholder="Search movies, shows, anime..." autocomplete="off">
+        <button type="submit" class="search-form-submit">Search</button>
+      </form>
+    </div>
+    <div id="search-suggestions" class="search-suggestions hidden"></div>
+    <div class="section-header">
+      <div class="section-title-wrap">
+        <div class="section-accent"></div>
+        <h2 class="section-title">Results for "<span id="search-query-display"></span>"</h2>
+      </div>
+      <p class="section-subtitle" id="search-result-count"></p>
+      <select id="filter-source-select" class="filter-select">
+        <option value="all">All Sources</option>
+      </select>
+    </div>
+    <div id="search-loading" class="fullscreen-state hidden">
+      <div class="spinner-ring"></div>
+      <p id="search-loading-title">Searching...</p>
+      <div class="search-progress-wrap">
+        <div id="search-progress-bar" class="progress-bar-inner"></div>
+      </div>
+      <div id="search-log" class="scrape-log"></div>
+    </div>
+    <div id="search-no-results" class="fullscreen-state hidden">
+      <h3>No Results Found</h3>
+      <p>Try a different search term.</p>
+    </div>
+    <div id="search-results-content" class="hidden" style="flex:1;overflow:hidden">
+      <div id="search-grid" class="content-grid" style="height:100%;overflow-y:auto;position:relative"></div>
+    </div>
+  </section>
+
+  <!-- ─── MOVIE DETAIL PAGE ─── -->
+  <section id="movie-detail-section" class="hidden">
+    <!-- Hero backdrop -->
+    <div class="detail-hero" id="detail-hero">
+      <div class="detail-hero-backdrop" id="detail-hero-backdrop"></div>
+      <div class="detail-hero-gradient"></div>
+      <button id="btn-detail-back" class="detail-back-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="18" height="18">
+          <polyline points="15 18 9 12 15 6"/>
+        </svg>
+        Back
+      </button>
+    </div>
+
+    <!-- Info card overlapping hero -->
+    <div class="detail-info-card">
+      <div class="detail-poster-col">
+        <img id="detail-poster-img" src="" alt="Poster" class="detail-poster">
+        <div id="detail-poster-placeholder" class="detail-poster-placeholder hidden">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" width="48" height="48">
+            <rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20M17 2v20M2 12h20"/>
+          </svg>
+        </div>
+      </div>
+      <div class="detail-info-col">
+        <h1 id="detail-title" class="detail-title">Loading...</h1>
+        <div class="detail-meta-pills">
+          <span id="detail-rating-chip" class="meta-pill hidden">
+            <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+            <span id="detail-rating-val"></span>
+          </span>
+          <span id="detail-year-chip" class="meta-pill hidden">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+            <span id="detail-year-val"></span>
+          </span>
+          <span id="detail-seasons-chip" class="meta-pill meta-pill-accent hidden">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M4 6h16M4 10h16M4 14h16M4 18h16"/></svg>
+            <span id="detail-seasons-val"></span>
+          </span>
+          <span id="detail-genre-chip" class="meta-pill hidden"></span>
+        </div>
+        <button id="detail-watch-btn" class="detail-watch-btn">
+          <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          <span id="detail-watch-label">Watch Now</span>
+        </button>
+        <div class="detail-description-section">
+          <h3 class="detail-section-heading">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="18" y2="18"/></svg>
+            Plot Summary
+          </h3>
+          <p id="detail-description" class="detail-description"></p>
+        </div>
+        <div id="source-chips" class="source-chips"></div>
+      </div>
+    </div>
+
+    <!-- Video player -->
+    <div id="modal-video-container" class="hidden">
+        <div class="custom-player" id="playerContainer">
+        <div id="cache-badge" class="cache-badge hidden"></div>
+        <div id="video-loading-overlay" class="video-loading-overlay hidden">
+          <div class="spinner-ring"></div>
+          <span>Resolving stream...</span>
+        </div>
+        <div id="quality-picker-overlay" class="quality-picker-overlay hidden">
+          <div class="quality-picker-box">
+            <div class="quality-picker-title">Select Quality</div>
+            <div id="quality-picker-list" class="quality-picker-list"></div>
+            <button id="quality-picker-cancel" class="quality-picker-cancel">Cancel</button>
+          </div>
+        </div>
+
+        <!-- Top-right fullscreen button -->
+        <div class="top-controls">
+          <button class="icon-btn" id="fullscreenBtnTop" title="Fullscreen">
+            <svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+          </button>
+        </div>
+
+        <video id="modal-video-player" preload="auto"></video>
+
+        <button class="center-play-btn" id="centerPlayBtn">
+          <svg width="22" height="24" viewBox="0 0 22 24" fill="#ffffff"><path d="M2 1.862a1.5 1.5 0 0 1 2.274-1.282l15.221 9.133a1.5 1.5 0 0 1 0 2.564L4.274 23.42A1.5 1.5 0 0 1 2 22.138V1.862z"/></svg>
+        </button>
+
+        <div class="bottom-dashboard" id="bottomDashboard">
+          <div class="video-metadata-title" id="videoTitleText"></div>
+          <div class="timeline-container" id="timelineContainer">
+            <div class="timeline-progress" id="timelineProgress"></div>
+            <input type="range" class="timeline-scrubber" id="timelineScrubber" min="0" max="1000" value="0" step="1">
+          </div>
+          <div class="control-actions-row">
+            <div class="control-group">
+              <button class="icon-btn" id="playToggle" title="Play/Pause">
+                <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+              </button>
+              <button class="icon-btn" id="volumeBtn" title="Volume">
+                <svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+              </button>
+              <div class="volume-slider-wrap">
+                <input type="range" class="volume-slider" id="volumeSlider" min="0" max="1" step="0.05" value="1">
+              </div>
+              <button class="icon-btn" id="skipBackBtn" title="-10s">
+                <svg viewBox="0 0 24 24"><path d="M12.5 8c-2.65 0-5.05 1-6.9 2.6L3.2 8.2V14h5.8l-2.2-2.2c1.5-1.3 3.4-2.1 5.7-2.1 4.2 0 7.7 3.1 8.3 7.1h2.1c-.6-5.1-5-9-10.4-9z"/></svg>
+              </button>
+              <button class="icon-btn" id="skipForwardBtn" title="+10s">
+                <svg viewBox="0 0 24 24"><path d="M11.5 8c2.65 0 5.05 1 6.9 2.6l2.4-2.4V14h-5.8l2.2-2.2c-1.5-1.3-3.4-2.1-5.7-2.1-4.2 0-7.7 3.1-8.3 7.1H1.1c.6-5.1 5-9 10.4-9z"/></svg>
+              </button>
+            </div>
+            <div class="control-group">
+              <span class="time-counter" id="timeDisplay">0:00 / 0:00</span>
+              <button class="icon-btn" id="cacheBtn" title="Save for offline">
+                <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+              </button>
+              <button class="icon-btn subs-btn" id="subsBtn" title="Subtitles">
+                <span class="cc-letters">CC</span>
+              </button>
+              <div id="subsMenu" class="subs-menu hidden"></div>
+              <button class="icon-btn" id="pipBtn" title="Picture in Picture">
+                <svg viewBox="0 0 24 24"><path d="M19 11h-8v6h8v-6zm4 8V5c0-1.1-.9-2-2-2H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2zm-2 0H3V5h18v14z"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="modal-video-close" class="video-close-btn" style="display:none;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="20" height="20"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </div>
+
+    <!-- Seasons + Episodes (TV shows) -->
+    <div id="detail-seasons-section" class="detail-seasons-section hidden">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+        <h3 class="detail-section-heading" style="margin-bottom:0;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="14"><rect x="2" y="7" width="20" height="15" rx="2"/><polyline points="17 2 12 7 7 2"/></svg>
+          Seasons
+        </h3>
+        <div id="anime-lang-toggle" class="lang-toggle hidden">
+          <button class="lang-btn active" data-lang="sub">Sub</button>
+          <button class="lang-btn" data-lang="dub">Dub</button>
+        </div>
+      </div>
+      <div id="detail-seasons-list" class="detail-seasons-list"></div>
+      <div id="detail-episodes-grid" class="detail-episodes-grid"></div>
+    </div>
+
+    <!-- Cast -->
+    <div id="detail-cast-section" class="detail-cast-section hidden">
+      <h3 class="detail-section-heading">Cast</h3>
+      <div id="detail-cast-list" class="detail-cast-list"></div>
+    </div>
+
+    <!-- Related Shows -->
+    <div id="detail-related-section" class="detail-related-section hidden">
+      <h3 class="detail-section-heading">Related Shows</h3>
+      <div id="detail-related-grid" class="detail-related-grid"></div>
+    </div>
+
+    <!-- Download Options -->
+    <div class="detail-bottom">
+      <div class="download-section" id="detail-download-section">
+        <div class="download-section-header">
+          <h3>Download Options</h3>
+          <button id="btn-refetch-links" class="btn-refetch" title="Refresh">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="14" height="14">
+              <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+            </svg>
+          </button>
+        </div>
+        <div id="download-options-container">
+          <div id="dl-loading" class="dl-status">
+            <div class="spinner-sm"></div>
+            <span>Fetching download links...</span>
+          </div>
+          <div id="dl-error" class="dl-status dl-error hidden">
+            <span id="dl-error-msg"></span>
+          </div>
+          <div id="dl-options-list"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+
+<script>
+(function() {
+  setTimeout(() => {
+    const screen = document.getElementById('loading-screen');
+    if (screen) screen.classList.add('fade-out');
+  }, 10000);
+})();
+</script>
+
+<script src="api-bridge.js"></script>
+<script src="renderer.js"></script>
+</body>
+</html>
