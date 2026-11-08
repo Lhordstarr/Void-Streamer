@@ -4,12 +4,60 @@ const http = require('http');
 const crypto = require('crypto');
 
 // Lazy-loaded modules — loaded on first use, not at startup
-let _fs, _axios, _scraper;
+let _fs, _axios, _scraper, _https;
 function getFs()     { return _fs     || (_fs     = require('fs')); }
 function getAxios()  { return _axios  || (_axios  = require('axios')); }
 function getScraper(){ return _scraper || (_scraper = require('./scraper')); }
+function getHttps()  { return _https  || (_https  = require('https')); }
 
 const BROWSER_HEADERS = { 'User-Agent': 'Mozilla/5.0' };
+
+// Read only the first `limit` bytes of a remote URL. Used to sniff whether a
+// .txt/.ts/.m4s URL is really an HLS playlist without buffering a whole video
+// segment into memory.
+function fetchPrefix(url, limit = 64 * 1024, redirects = 5) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const done = (err, data) => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err); else resolve(data);
+    };
+
+    let u;
+    try { u = new URL(url); } catch { return done(new Error('Bad URL')); }
+    const mod = u.protocol === 'https:' ? getHttps()
+      : u.protocol === 'http:' ? http : null;
+    if (!mod) return done(new Error('Protocol not allowed'));
+
+    const req = mod.get(u, { headers: BROWSER_HEADERS }, (res) => {
+      const status = res.statusCode || 0;
+      if (status >= 300 && status < 400 && res.headers.location && redirects > 0) {
+        res.resume();
+        const next = new URL(res.headers.location, u).toString();
+        return fetchPrefix(next, limit, redirects - 1).then(
+          (data) => done(null, data),
+          (err) => done(err)
+        );
+      }
+      if (status >= 400) { res.resume(); return done(new Error('HTTP ' + status)); }
+
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        data += chunk;
+        if (data.length >= limit) {
+          req.destroy();
+          done(null, data.slice(0, limit));
+        }
+      });
+      res.on('end', () => done(null, data));
+      res.on('error', (e) => done(e));
+    });
+    req.setTimeout(15000, () => req.destroy(new Error('Timeout')));
+    req.on('error', (e) => done(e));
+  });
+}
 
 // Enable GPU acceleration for smoother rendering
 app.commandLine.appendSwitch('enable-gpu-rasterization');
@@ -51,8 +99,56 @@ const abibliSessions = new Map(); // token -> { playlistUrl, client, origin, cre
 const ABIBLI_ORIGIN = 'https://rov.funnyotter.xyz';
 const ABIBLI_STREAM_HOST = 's5v.lazyrocket.space';
 
+// The local proxy listens on loopback, but that still means every process on
+// the machine (and any web page that learns the port) can use it. Require a
+// per-run token and refuse private/loopback targets so it cannot be used as an
+// SSRF gadget.
+const PROXY_TOKEN = crypto.randomBytes(16).toString('hex');
+
 function getLocalProxyBase() {
   return `http://127.0.0.1:${localMediaPort || 0}`;
+}
+
+function isPrivateHost(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return true;
+  if (h === 'localhost' || h === '0.0.0.0' || h === '::1' || h === '::' ||
+      h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.localhost')) return true;
+  if (h.startsWith('::ffff:')) return isPrivateHost(h.slice(7));
+  if (h.includes(':')) {
+    // IPv6 unique-local (fc00::/7) and link-local (fe80::/10)
+    if (h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80:')) return true;
+    return false;
+  }
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!m) return false;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  if (a === 169 && b === 254) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 0) return true; // 192.0.0.0/24, 192.0.2.0/24
+  if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking
+  if (a === 198 && b === 51) return true; // TEST-NET-2
+  if (a === 203 && b === 0) return true; // TEST-NET-3
+  if (a >= 224) return true; // multicast + reserved
+  return false;
+}
+
+function isProxyTargetAllowed(raw) {
+  let u;
+  try { u = new URL(raw); } catch { return false; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  return !isPrivateHost(u.hostname);
+}
+
+function isSafeExternalUrl(raw) {
+  try {
+    const u = new URL(raw);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch { return false; }
 }
 
 function pruneAbibliSessions() {
@@ -95,6 +191,17 @@ function isPlaylistResponse(targetUrl, contentType) {
   return false;
 }
 
+// Axios/follow-redirects follows redirects on its own. Validate every hop so a
+// public stream URL cannot redirect the local proxy into a private service.
+function proxyRedirectGuard(options) {
+  const proto = options.protocol || 'http:';
+  const host = options.hostname || options.host || '';
+  const port = options.port ? `:${options.port}` : '';
+  if (!isProxyTargetAllowed(`${proto}//${host}${port}`)) {
+    throw new Error('Redirect target is not allowed');
+  }
+}
+
 // Streamed fetch: never buffer whole files (direct MP4s can be gigabytes).
 async function fetchProxiedStream(target, extraHeaders, req) {
   const headers = {
@@ -111,7 +218,8 @@ async function fetchProxiedStream(target, extraHeaders, req) {
     timeout: 30000,
     headers,
     validateStatus: () => true,
-    maxRedirects: 5
+    maxRedirects: 5,
+    beforeRedirect: proxyRedirectGuard
   });
   return resp;
 }
@@ -209,14 +317,18 @@ async function handleAbibliProxy(req, res, urlObj) {
 }
 
 async function handleGenericHlsProxy(req, res, urlObj) {
+  if (urlObj.searchParams.get('t') !== PROXY_TOKEN) {
+    res.writeHead(403, { 'Access-Control-Allow-Origin': '*' }); res.end('Forbidden'); return;
+  }
+
   const target = urlObj.searchParams.get('u');
   const origin = urlObj.searchParams.get('o') || '';
   if (!target) { res.writeHead(400, { 'Access-Control-Allow-Origin': '*' }); res.end('Missing u'); return; }
 
   let parsed;
   try { parsed = new URL(target); } catch { res.writeHead(400); res.end('Bad URL'); return; }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    res.writeHead(403, { 'Access-Control-Allow-Origin': '*' }); res.end('Protocol not allowed'); return;
+  if (!isProxyTargetAllowed(target)) {
+    res.writeHead(403, { 'Access-Control-Allow-Origin': '*' }); res.end('Target not allowed'); return;
   }
 
   const extra = {};
@@ -225,10 +337,13 @@ async function handleGenericHlsProxy(req, res, urlObj) {
     extra['Referer'] = origin.endsWith('/') ? origin : origin + '/';
   }
 
-  const wrap = (abs) => `${getLocalProxyBase()}/hls?u=${encodeURIComponent(abs)}&o=${encodeURIComponent(origin)}`;
+  // Propagate signed query params (tokens, expiry, etc.) from the playlist
+  // URL to every child URI, the same way the Abibli proxy does.
+  const authQuery = parsed.searchParams.toString();
+  const wrap = (abs) => `${getLocalProxyBase()}/hls?u=${encodeURIComponent(abs)}&o=${encodeURIComponent(origin)}&t=${PROXY_TOKEN}`;
   try {
     const upstream = await fetchProxiedStream(target, extra, req);
-    await sendProxyStream(req, res, upstream, target, wrap, '');
+    await sendProxyStream(req, res, upstream, target, wrap, authQuery);
   } catch (e) {
     res.writeHead(502, { 'Access-Control-Allow-Origin': '*' }); res.end('Proxy error: ' + e.message);
   }
@@ -269,19 +384,50 @@ function startLocalMediaServer() {
     const ext = path.extname(filePath).toLowerCase();
     const contentType = MIME_TYPES[ext] || 'application/octet-stream';
     const stat = getFs().statSync(filePath, { throwIfNoEntry: false });
-    if (!stat) {
+    if (!stat || !stat.isFile()) {
       res.writeHead(404); res.end('Not found');
       return;
     }
-    res.writeHead(200, {
+
+    // Honour Range requests so seeking in downloaded/cached files works.
+    let start = 0;
+    let end = stat.size - 1;
+    let status = 200;
+    const rangeHeader = req.headers.range;
+    if (rangeHeader) {
+      const match = /^bytes=(\d*)-(\d*)$/i.exec(String(rangeHeader).trim());
+      if (match) {
+        if (match[1] === '' && match[2] !== '') {
+          // Suffix range: bytes=-500 (last 500 bytes)
+          const suffix = parseInt(match[2], 10);
+          start = Math.max(0, stat.size - suffix);
+        } else {
+          start = parseInt(match[1] || '0', 10);
+          if (match[2] !== '') end = parseInt(match[2], 10);
+        }
+      }
+      if (!match || isNaN(start) || isNaN(end) || start > end || start >= stat.size) {
+        res.writeHead(416, { 'Content-Range': `bytes */${stat.size}`, 'Access-Control-Allow-Origin': '*' });
+        res.end();
+        return;
+      }
+      end = Math.min(end, stat.size - 1);
+      status = 206;
+    }
+
+    const headers = {
       'Content-Type': contentType,
-      'Content-Length': stat.size,
+      'Content-Length': end - start + 1,
       'Accept-Ranges': 'bytes',
       'Access-Control-Allow-Origin': '*'
-    });
-    const stream = getFs().createReadStream(filePath);
+    };
+    if (status === 206) headers['Content-Range'] = `bytes ${start}-${end}/${stat.size}`;
+    res.writeHead(status, headers);
+    if (req.method === 'HEAD') { res.end(); return; }
+
+    const stream = getFs().createReadStream(filePath, { start, end });
     stream.pipe(res);
-    stream.on('error', () => { res.writeHead(500); res.end('Error'); });
+    stream.on('error', () => { try { res.destroy(); } catch {} });
   });
   server.listen(0, '127.0.0.1', () => {
     localMediaPort = server.address().port;
@@ -352,26 +498,29 @@ function createWindow() {
 
 }
 
-// Security: block navigation and new windows (except video streams and local server)
+// Security: block unexpected popups/navigation. Scraper windows load third-party
+// pages that trigger popups/redirects — never open them in the native browser.
+// Only explicit user actions should open external links (open-external IPC).
 app.on('web-contents-created', (event, contents) => {
+  const isMain = () => mainWindow && !mainWindow.isDestroyed() && contents === mainWindow.webContents;
+  const isLocalOrStream = (url) =>
+    typeof url === 'string' && (
+      url.startsWith('file://') ||
+      url.startsWith('http://127.0.0.1') || url.startsWith('http://localhost') ||
+      url.includes('.m3u8') || url.includes('.mp4') || url.includes('.ts') || url.endsWith('.txt')
+    );
+
   contents.on('will-navigate', (event, url) => {
-    // Allow local server and video stream URLs to navigate normally
-    if (url.startsWith('http://127.0.0.1') || url.startsWith('http://localhost') ||
-        url.includes('.m3u8') || url.includes('.mp4') || url.includes('.ts') ||
-        url.endsWith('.txt')) {
-      return;
-    }
+    // Scraper windows must be allowed to navigate (pages redirect to players).
+    if (!isMain()) return;
+    if (isLocalOrStream(url)) return;
     event.preventDefault();
-    shell.openExternal(url);
   });
+
   contents.setWindowOpenHandler(({ url }) => {
-    // Allow video stream URLs to open in the app
-    if (url.startsWith('http://127.0.0.1') || url.startsWith('http://localhost') ||
-        url.includes('.m3u8') || url.includes('.mp4') || url.includes('.ts') ||
-        url.endsWith('.txt')) {
-      return { action: 'allow' };
-    }
-    shell.openExternal(url);
+    if (isLocalOrStream(url)) return { action: 'allow' };
+    // Deny all popups; opening them in the native browser is disruptive and
+    // commonly triggered by ads in source/scraper pages.
     return { action: 'deny' };
   });
 });
@@ -391,7 +540,7 @@ app.whenReady().then(() => {
     'https://cache.vdrk.site', 'https://natsuki.hls.lol'
   ];
   preconnectDomains.forEach(url => {
-    try { ses.resolveHost(url).catch(() => {}); } catch {}
+    try { ses.resolveHost(new URL(url).hostname).catch(() => {}); } catch {}
   });
 
   // Startup provider health check (lightweight pings)
@@ -624,7 +773,12 @@ ipcMain.handle('scrape-spa', async (event, { url, jsCode }) => {
 
     const win = new BrowserWindow({
       width: 1280, height: 800, show: false,
-      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false }
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        partition: 'scrape-' + crypto.randomBytes(8).toString('hex')
+      }
     });
 
     const cleanup = () => { if (!win.isDestroyed()) win.destroy(); };
@@ -689,7 +843,8 @@ ipcMain.handle('scrape-movibox-stream', async (event, { url }) => {
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
-        sandbox: false
+        sandbox: true,
+        partition: 'scrape-' + crypto.randomBytes(8).toString('hex')
       }
     });
 
@@ -712,7 +867,7 @@ ipcMain.handle('scrape-movibox-stream', async (event, { url }) => {
       if (result && result.success && result.streamUrl && /^https?:\/\//.test(result.streamUrl) &&
           !result.streamUrl.startsWith('http://127.0.0.1') && !result.streamUrl.startsWith('http://localhost')) {
         const origin = pageOrigin || 'https://vidfast.vc';
-        result.streamUrl = `${getLocalProxyBase()}/hls?u=${encodeURIComponent(result.streamUrl)}&o=${encodeURIComponent(origin)}`;
+        result.streamUrl = `${getLocalProxyBase()}/hls?u=${encodeURIComponent(result.streamUrl)}&o=${encodeURIComponent(origin)}&t=${PROXY_TOKEN}`;
       }
       resolve(result);
       return true;
@@ -1204,9 +1359,18 @@ function resolveUrl(base, href) {
   return dir + href;
 }
 
-async function downloadHls(playlistUrl, outputPath, downloadId, image) {
+async function downloadHls(playlistUrl, outputPath, downloadId, image, job) {
   const send = (type, data) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(type, { downloadId, ...data });
+  };
+
+  const cancelledError = () => Object.assign(new Error('Download cancelled'), { cancelled: true });
+  const throwIfCancelled = () => { if (job && job.cancelled) throw cancelledError(); };
+  const waitWhilePaused = async () => {
+    while (job && job.paused && !job.cancelled) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throwIfCancelled();
   };
 
   async function fetchText(url) {
@@ -1303,6 +1467,7 @@ async function downloadHls(playlistUrl, outputPath, downloadId, image) {
   async function writeRemote(url, targetWriter) {
     let lastErr;
     for (let attempt = 0; attempt < 2; attempt++) {
+      await waitWhilePaused();
       try {
         const resp = await getAxios()({
           url,
@@ -1310,26 +1475,42 @@ async function downloadHls(playlistUrl, outputPath, downloadId, image) {
           timeout: 60000,
           headers: BROWSER_HEADERS
         });
+        if (job) job.currentStream = resp.data;
         const len = parseInt(resp.headers['content-length'] || '0', 10);
         if (len > 0) bytesTotal += len;
         await new Promise((resolve, reject) => {
+          let settled = false;
+          const finish = (err) => {
+            if (settled) return;
+            settled = true;
+            if (err) reject(err); else resolve();
+          };
           resp.data.on('data', (chunk) => {
             bytesReceived += chunk.length;
+            if (job) job.received = bytesReceived;
             const now = Date.now();
             if (now - lastSpeedSample >= 400) {
               const elapsed = (now - startedAt) / 1000;
               const speed = elapsed > 0 ? Math.round(bytesReceived / elapsed) : 0;
               lastSpeedSample = now;
               const pct = totalUnits > 0 ? Math.min(99, Math.round((doneUnits / totalUnits) * 99)) : 0;
+              if (job) job.percent = pct;
               send('download-progress', { percent: pct, received: bytesReceived, total: bytesTotal, speed });
             }
           });
           resp.data.pipe(targetWriter, { end: false });
-          resp.data.on('end', resolve);
-          resp.data.on('error', reject);
+          resp.data.on('end', () => finish());
+          resp.data.on('error', (err) => finish(err));
+          // destroy() (cancel) emits 'close' but not 'end'/'error'.
+          resp.data.on('close', () => {
+            if (!settled) finish(new Error('Stream closed'));
+          });
         });
+        if (job) job.currentStream = null;
         return;
       } catch (e) {
+        if (job) job.currentStream = null;
+        if (job && job.cancelled) throw cancelledError();
         lastErr = e;
       }
     }
@@ -1371,12 +1552,17 @@ async function downloadHls(playlistUrl, outputPath, downloadId, image) {
   }
 
   const writer = getFs().createWriteStream(outputPath);
+  let audioWriter = null;
   try {
     await writePlaylist(video, writer);
+    throwIfCancelled();
     let audioPath = '';
     if (audio) {
       audioPath = outputPath.replace(/(\.[^.]+)?$/, '.audio.mp4');
-      await writePlaylist(audio, getFs().createWriteStream(audioPath));
+      if (job) job.partialPaths.add(audioPath);
+      audioWriter = getFs().createWriteStream(audioPath);
+      await writePlaylist(audio, audioWriter);
+      throwIfCancelled();
     }
     let subtitlesPath = '';
     if (masterBody) {
@@ -1391,6 +1577,11 @@ async function downloadHls(playlistUrl, outputPath, downloadId, image) {
     };
   } catch (e) {
     try { writer.destroy(); } catch {}
+    try { if (audioWriter) audioWriter.destroy(); } catch {}
+    if (job && job.currentStream) {
+      try { job.currentStream.destroy(); } catch {}
+      job.currentStream = null;
+    }
     throw e;
   }
 }
@@ -1412,8 +1603,9 @@ ipcMain.handle('analyze-stream', async (event, { url, quick }) => {
 
   try {
     if (isM3u8 || isTxt) {
-      const resp = await getAxios().get(url, { headers: BROWSER_HEADERS, timeout: 15000 });
-      const body = typeof resp.data === 'string' ? resp.data : resp.data.toString();
+      // Sniff the first 64 KB only: playlists are tiny, and .ts/.m4s files can
+      // be hundreds of megabytes.
+      const body = await fetchPrefix(url, 64 * 1024);
       const lines = body.split('\n');
 
       // Check if it's actually an HLS playlist
@@ -1537,8 +1729,9 @@ ipcMain.handle('start-download', async (event, { url, title, quality, image }) =
 
   if (isTxt && !isM3u8) {
     try {
-      const probe = await getAxios().get(url, { headers: BROWSER_HEADERS, timeout: 8000, responseType: 'text', maxRedirects: 3 });
-      const body = typeof probe.data === 'string' ? probe.data : probe.data.toString();
+      // Only sniff a prefix: a .txt URL may be a playlist (small) or a direct
+      // video (potentially huge).
+      const body = await fetchPrefix(url, 64 * 1024);
       if (body.includes('#EXTM3U') || body.includes('#EXTINF')) {
         isHls = true;
         hlsDetectedByContent = true;
@@ -1548,19 +1741,37 @@ ipcMain.handle('start-download', async (event, { url, title, quality, image }) =
     }
   }
 
-  const ext = isHls ? '.mp4' : '.mp4';
+  // Direct .ts files must keep their real extension: remuxing a .ts saved as
+  // .mp4 would use the same path for input and output.
+  let urlPath = '';
+  try { urlPath = new URL(url).pathname.toLowerCase(); } catch { urlPath = String(url).toLowerCase().split('?')[0]; }
+  const isDirectTs = !isHls && urlPath.endsWith('.ts');
+  const ext = isHls ? '.mp4' : (isDirectTs ? '.ts' : '.mp4');
   const defaultName = (title || 'video').replace(/[<>:"/\\|?*]/g, '_') + ext;
   const downloadsDir = path.join(app.getPath('downloads'), 'Void Streamer');
   if (!getFs().existsSync(downloadsDir)) getFs().mkdirSync(downloadsDir, { recursive: true });
-  let filePath = path.join(downloadsDir, defaultName);
-  if (getFs().existsSync(filePath)) {
-    const base = defaultName.replace(/\.[^.]+$/, '');
-    let counter = 1;
-    while (getFs().existsSync(filePath)) {
-      filePath = path.join(downloadsDir, `${base} (${counter})${ext}`);
-      counter++;
+
+  // Avoid overwriting existing files. For direct .ts downloads the remuxed
+  // .mp4 is user-visible too, so reserve a free name for it as well.
+  const pickFilePath = (candidate) => {
+    let p = candidate;
+    let n = 0;
+    while (getFs().existsSync(p) || (isDirectTs && getFs().existsSync(p.replace(/\.ts$/, '.mp4')))) {
+      n++;
+      p = candidate.replace(/(\.[^.]+)$/, ` (${n})$1`);
     }
-  }
+    return p;
+  };
+  const uniqueSibling = (candidate) => {
+    if (!getFs().existsSync(candidate)) return candidate;
+    const siblingExt = path.extname(candidate);
+    const base = candidate.slice(0, -siblingExt.length);
+    let n = 1;
+    while (getFs().existsSync(`${base} (${n})${siblingExt}`)) n++;
+    return `${base} (${n})${siblingExt}`;
+  };
+  let filePath = pickFilePath(path.join(downloadsDir, defaultName));
+  const directRemuxPath = isDirectTs ? uniqueSibling(filePath.replace(/\.ts$/, '.mp4')) : '';
 
   const downloadId = `dl_${++downloadIdCounter}`;
 
@@ -1568,30 +1779,74 @@ ipcMain.handle('start-download', async (event, { url, title, quality, image }) =
     mainWindow.webContents.send('download-started', { downloadId, filename: path.basename(filePath), url, image });
   }
 
+  // Track every job from the start so pause/cancel work for HLS downloads too.
+  const job = {
+    kind: isHls ? 'hls' : 'direct',
+    paused: false,
+    cancelled: false,
+    filePath,
+    received: 0,
+    total: 0,
+    percent: 0,
+    stream: null,
+    writer: null,
+    controller: new AbortController(),
+    currentStream: null,
+    partialPaths: new Set()
+  };
+  activeDownloads.set(downloadId, job);
+
+  const sendDone = (data) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('download-done', { downloadId, ...data });
+    }
+  };
+  const cleanupPartials = () => {
+    for (const p of job.partialPaths) {
+      try { if (getFs().existsSync(p)) getFs().unlinkSync(p); } catch {}
+    }
+  };
+
   try {
     if (isHls) {
       const mp4Path = filePath;
       const partPath = filePath.replace(/\.mp4$/, '.download.mp4');
-      const result = await downloadHls(url, partPath, downloadId, image);
+      job.partialPaths.add(partPath);
+      job.partialPaths.add(mp4Path);
+      const result = await downloadHls(url, partPath, downloadId, image, job);
+      if (job.cancelled) throw Object.assign(new Error('Download cancelled'), { cancelled: true });
 
+      let finalPath = mp4Path;
+      let warning = '';
       if (result.audioPath) {
-        // Separate video/audio renditions (Abibli) — mux them with FFmpeg WASM.
-        await muxFmp4Renderer(partPath, result.audioPath, mp4Path, downloadId);
+        // Separate video/audio renditions (Abibli) — mux them.
+        job.partialPaths.add(result.audioPath);
+        const muxResult = await muxFmp4Renderer(partPath, result.audioPath, mp4Path, downloadId);
+        if (job.cancelled) throw Object.assign(new Error('Download cancelled'), { cancelled: true });
+        if (!muxResult.muxed) {
+          warning = 'Audio track could not be muxed; saved video only.';
+        }
       } else if (result.isFmp4) {
         // Fragmented MP4 segments are already a valid MP4 after concatenation.
         try { if (getFs().existsSync(mp4Path)) getFs().unlinkSync(mp4Path); } catch {}
         getFs().renameSync(partPath, mp4Path);
       } else {
         // Classic TS segments: remux to MP4.
-        const tsPath = filePath.replace(/\.mp4$/, '.ts');
-        try { if (getFs().existsSync(tsPath)) getFs().unlinkSync(tsPath); } catch {}
+        const tsPath = uniqueSibling(filePath.replace(/\.mp4$/, '.ts'));
+        job.partialPaths.add(tsPath);
         getFs().renameSync(partPath, tsPath);
-        await remuxTsToMp4Renderer(tsPath, mp4Path, downloadId);
+        const remuxResult = await remuxTsToMp4Renderer(tsPath, mp4Path, downloadId);
+        if (job.cancelled) throw Object.assign(new Error('Download cancelled'), { cancelled: true });
+        if (!remuxResult.success) {
+          try { if (getFs().existsSync(mp4Path)) getFs().unlinkSync(mp4Path); } catch {}
+          finalPath = tsPath;
+          warning = 'MP4 remux failed; saved as .ts.';
+        }
       }
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('download-done', { downloadId, state: 'completed', path: mp4Path });
-      }
-      return { success: true, path: mp4Path };
+      activeDownloads.delete(downloadId);
+      if (job.cancelled) throw Object.assign(new Error('Download cancelled'), { cancelled: true });
+      sendDone({ state: 'completed', path: finalPath, warning });
+      return { success: true, path: finalPath, warning };
     }
 
     // Direct MP4 / binary stream via axios
@@ -1599,23 +1854,28 @@ ipcMain.handle('start-download', async (event, { url, title, quality, image }) =
       url,
       responseType: 'stream',
       timeout: 120000,
+      signal: job.controller.signal,
       headers: BROWSER_HEADERS
     });
+    if (job.cancelled) {
+      try { response.data.destroy(); } catch {}
+      throw Object.assign(new Error('Download cancelled'), { cancelled: true });
+    }
 
     const total = parseInt(response.headers['content-length'] || '0', 10);
     let received = 0;
     const writer = getFs().createWriteStream(filePath);
+    job.stream = response.data;
+    job.writer = writer;
+    job.total = total;
+    if (isDirectTs) job.partialPaths.add(directRemuxPath);
     const startedAt = Date.now();
     let lastSample = 0;
 
-    // Track this download for pause/resume/cancel
-    const dlState = { stream: response.data, writer, paused: false, filePath, received: 0, total };
-    activeDownloads.set(downloadId, dlState);
-
     response.data.on('data', (chunk) => {
-      if (dlState.paused) return; // skip writes when paused
+      if (job.paused) return; // pause() also stops flow; guard against races
       received += chunk.length;
-      dlState.received = received;
+      job.received = received;
       const now = Date.now();
       let speed;
       if (now - lastSample >= 400) {
@@ -1624,44 +1884,61 @@ ipcMain.handle('start-download', async (event, { url, title, quality, image }) =
         lastSample = now;
       }
       const percent = total > 0 ? Math.round((received / total) * 100) : 0;
+      job.percent = percent;
       if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('download-progress', { downloadId, percent, received, total, speed, paused: dlState.paused });
+        mainWindow.webContents.send('download-progress', { downloadId, percent, received, total, speed, paused: job.paused });
       }
     });
 
     response.data.pipe(writer);
 
     return new Promise((resolve) => {
-      writer.on('finish', async () => {
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
         activeDownloads.delete(downloadId);
+        resolve(result);
+      };
+
+      writer.on('finish', async () => {
+        if (job.cancelled) { finish({ success: false, cancelled: true }); return; }
+        let finalPath = filePath;
+        let warning = '';
         // If the URL was .ts, remux to .mp4 via FFmpeg WASM
-        const urlLower = (url || '').toLowerCase();
-        if (urlLower.endsWith('.ts') && !urlLower.includes('.srt') && !urlLower.includes('.vtt')) {
-          const mp4Path = filePath.replace(/\.ts$/, '.mp4');
-          try {
-            const remuxResult = await remuxTsToMp4Renderer(filePath, mp4Path, downloadId);
-            if (remuxResult && remuxResult.success) {
-              filePath = mp4Path;
-            }
-          } catch {}
+        if (isDirectTs) {
+          const mp4Path = directRemuxPath;
+          const remuxResult = await remuxTsToMp4Renderer(filePath, mp4Path, downloadId);
+          if (remuxResult && remuxResult.success) {
+            finalPath = mp4Path;
+          } else {
+            try { if (getFs().existsSync(mp4Path)) getFs().unlinkSync(mp4Path); } catch {}
+            warning = 'MP4 remux failed; saved as .ts.';
+          }
         }
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('download-done', { downloadId, state: 'completed', path: filePath });
+        if (job.cancelled) {
+          cleanupPartials();
+          finish({ success: false, cancelled: true });
+          return;
         }
-        resolve({ success: true, path: filePath });
+        sendDone({ state: 'completed', path: finalPath, warning });
+        finish({ success: true, path: finalPath, warning });
       });
       writer.on('error', (err) => {
-        activeDownloads.delete(downloadId);
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('download-done', { downloadId, state: 'interrupted', path: filePath });
-        }
-        resolve({ success: false, error: err.message });
+        if (job.cancelled) { finish({ success: false, cancelled: true }); return; }
+        sendDone({ state: 'interrupted', path: filePath });
+        finish({ success: false, error: err.message });
+      });
+      writer.on('close', () => {
+        // cancel() destroys the writer, so 'finish' never fires.
+        if (job.cancelled) finish({ success: false, cancelled: true });
       });
     });
   } catch (e) {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('download-done', { downloadId, state: 'interrupted' });
-    }
+    activeDownloads.delete(downloadId);
+    cleanupPartials();
+    if (job.cancelled || e.cancelled) return { success: false, cancelled: true };
+    sendDone({ state: 'interrupted' });
     return { success: false, error: e.message };
   }
 });
@@ -1671,8 +1948,13 @@ ipcMain.handle('download-pause', async (event, { downloadId }) => {
   const dl = activeDownloads.get(downloadId);
   if (!dl) return { success: false, error: 'Download not found' };
   dl.paused = true;
+  // Direct downloads stop immediately by pausing the source stream. HLS jobs
+  // pause at the next segment boundary (see waitWhilePaused in downloadHls).
+  if (dl.stream && typeof dl.stream.pause === 'function') {
+    try { dl.stream.pause(); } catch {}
+  }
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('download-progress', { downloadId, percent: 0, received: dl.received, total: dl.total, speed: 0, paused: true });
+    mainWindow.webContents.send('download-progress', { downloadId, percent: dl.percent || 0, received: dl.received || 0, total: dl.total || 0, speed: 0, paused: true });
   }
   return { success: true };
 });
@@ -1682,6 +1964,12 @@ ipcMain.handle('download-resume', async (event, { downloadId }) => {
   const dl = activeDownloads.get(downloadId);
   if (!dl) return { success: false, error: 'Download not found' };
   dl.paused = false;
+  if (dl.stream && typeof dl.stream.resume === 'function') {
+    try { dl.stream.resume(); } catch {}
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('download-progress', { downloadId, percent: dl.percent || 0, received: dl.received || 0, total: dl.total || 0, speed: 0, paused: false });
+  }
   return { success: true };
 });
 
@@ -1689,15 +1977,21 @@ ipcMain.handle('download-resume', async (event, { downloadId }) => {
 ipcMain.handle('download-cancel', async (event, { downloadId }) => {
   const dl = activeDownloads.get(downloadId);
   if (!dl) return { success: false, error: 'Download not found' };
-  // Destroy the stream and close the writer
+  dl.cancelled = true;
+  dl.paused = false;
+  try { if (dl.controller) dl.controller.abort(); } catch {}
+  try { if (dl.currentStream && dl.currentStream.destroy) dl.currentStream.destroy(); } catch {}
+  try { if (dl.stream && dl.stream.destroy) dl.stream.destroy(); } catch {}
   try {
-    if (dl.stream && dl.stream.destroy) dl.stream.destroy();
-    if (dl.writer) dl.writer.end();
+    if (dl.writer && typeof dl.writer.destroy === 'function') dl.writer.destroy();
+    else if (dl.writer) dl.writer.end();
   } catch {}
-  // Delete the partial file
-  try {
-    if (dl.filePath && getFs().existsSync(dl.filePath)) getFs().unlinkSync(dl.filePath);
-  } catch {}
+  // Delete partial files (direct file, HLS parts, audio track, remux input).
+  const paths = new Set([dl.filePath]);
+  if (dl.partialPaths) for (const p of dl.partialPaths) paths.add(p);
+  for (const p of paths) {
+    try { if (p && getFs().existsSync(p)) getFs().unlinkSync(p); } catch {}
+  }
   activeDownloads.delete(downloadId);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('download-done', { downloadId, state: 'cancelled' });
@@ -1892,6 +2186,42 @@ ipcMain.handle('write-file', async (event, { filePath, data }) => {
   }
 });
 
+// Binary file access is limited to app data and the app's Downloads folder.
+// Needed by the FFmpeg WASM fallback, which cannot operate on text.
+function isAllowedBinaryPath(resolved) {
+  const roots = [
+    path.resolve(app.getPath('userData')) + path.sep,
+    path.resolve(path.join(app.getPath('downloads'), 'Void Streamer')) + path.sep
+  ];
+  return roots.some((root) => resolved.startsWith(root));
+}
+
+ipcMain.handle('read-file-binary', async (event, { filePath }) => {
+  try {
+    if (!filePath || typeof filePath !== 'string') return { success: false, error: 'Invalid path' };
+    const resolved = path.resolve(filePath);
+    if (!isAllowedBinaryPath(resolved)) return { success: false, error: 'Path outside allowed directories' };
+    return { success: true, data: getFs().readFileSync(resolved) };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+ipcMain.handle('write-file-binary', async (event, { filePath, data }) => {
+  try {
+    if (!filePath || typeof filePath !== 'string') return { success: false, error: 'Invalid path' };
+    if (data === undefined || data === null) return { success: false, error: 'No data' };
+    const resolved = path.resolve(filePath);
+    if (!isAllowedBinaryPath(resolved)) return { success: false, error: 'Path outside allowed directories' };
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    getFs().mkdirSync(path.dirname(resolved), { recursive: true });
+    getFs().writeFileSync(resolved, buf);
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
 
 // IPC: Scrape KawaiiAnime video URL from watch page
 ipcMain.handle('scrape-kawaii-anime-video', async (event, { url }) => {
@@ -1905,7 +2235,8 @@ ipcMain.handle('scrape-kawaii-anime-video', async (event, { url }) => {
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
-        sandbox: false
+        sandbox: true,
+        partition: 'scrape-' + crypto.randomBytes(8).toString('hex')
       }
     });
 
@@ -1999,7 +2330,12 @@ ipcMain.handle('scrape-anime-source-video', async (event, { url, lang }) => {
 
     const win = new BrowserWindow({
       width: 1280, height: 800, show: false,
-      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false }
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        partition: 'scrape-' + crypto.randomBytes(8).toString('hex')
+      }
     });
 
     const cleanup = () => { if (!win.isDestroyed()) win.destroy(); };
@@ -2015,7 +2351,7 @@ ipcMain.handle('scrape-anime-source-video', async (event, { url, lang }) => {
       if (result && result.success && result.streamUrl && /^https?:\/\//.test(result.streamUrl) &&
           !result.streamUrl.startsWith('http://127.0.0.1') && !result.streamUrl.startsWith('http://localhost')) {
         const origin = pageOrigin || 'https://vidfast.vc';
-        result.streamUrl = `${getLocalProxyBase()}/hls?u=${encodeURIComponent(result.streamUrl)}&o=${encodeURIComponent(origin)}`;
+        result.streamUrl = `${getLocalProxyBase()}/hls?u=${encodeURIComponent(result.streamUrl)}&o=${encodeURIComponent(origin)}&t=${PROXY_TOKEN}`;
       }
       resolve(result);
       return true;
@@ -2264,17 +2600,17 @@ async function muxFmp4Renderer(videoPath, audioPath, mp4Path, downloadId) {
   }
 
   let muxed = false;
-  try {
+  if (mainWindow && !mainWindow.isDestroyed()) try {
     const result = await mainWindow.webContents.executeJavaScript(`
       (async () => {
         try {
-          const v = await window.api.readFile(${JSON.stringify(videoPath)});
+          const v = await window.api.readFileBinary(${JSON.stringify(videoPath)});
           if (!v.success) return { success: false, error: v.error };
-          const a = await window.api.readFile(${JSON.stringify(audioPath)});
+          const a = await window.api.readFileBinary(${JSON.stringify(audioPath)});
           if (!a.success) return { success: false, error: a.error };
           const blob = await muxAvToMp4(new Uint8Array(v.data), new Uint8Array(a.data));
           const arr = await blob.arrayBuffer();
-          const res = await window.api.writeFile(${JSON.stringify(mp4Path)}, Array.from(new Uint8Array(arr)));
+          const res = await window.api.writeFileBinary(${JSON.stringify(mp4Path)}, new Uint8Array(arr));
           return res.success ? { success: true } : { success: false, error: res.error };
         } catch (e) {
           return { success: false, error: e.message };
@@ -2322,16 +2658,16 @@ async function remuxTsToMp4Renderer(tsPath, mp4Path, downloadId) {
     console.error('[remux] system ffmpeg failed, trying FFmpeg WASM:', res.error);
   }
 
-  try {
+  if (mainWindow && !mainWindow.isDestroyed()) try {
     const result = await mainWindow.webContents.executeJavaScript(`
       (async () => {
         try {
-          const readRes = await window.api.readFile(${JSON.stringify(tsPath)});
+          const readRes = await window.api.readFileBinary(${JSON.stringify(tsPath)});
           if (!readRes.success) return { success: false, error: readRes.error };
           const tsData = new Uint8Array(readRes.data);
           const blob = await remuxTsToMp4(tsData);
           const arr = await blob.arrayBuffer();
-          const writeRes = await window.api.writeFile(${JSON.stringify(mp4Path)}, Array.from(new Uint8Array(arr)));
+          const writeRes = await window.api.writeFileBinary(${JSON.stringify(mp4Path)}, new Uint8Array(arr));
           if (!writeRes.success) return { success: false, error: writeRes.error };
           return { success: true, path: ${JSON.stringify(mp4Path)} };
         } catch (e) {
@@ -2344,9 +2680,9 @@ async function remuxTsToMp4Renderer(tsPath, mp4Path, downloadId) {
       return { success: true, path: mp4Path };
     }
   } catch {}
-  // Fallback: just rename
-  try { getFs().renameSync(tsPath, mp4Path); } catch {}
-  return { success: true, path: mp4Path };
+  // Do not rename a .ts to .mp4: that produces a file most players will not
+  // seek correctly and hides the failure. Keep the original .ts instead.
+  return { success: false, error: 'Remux failed', path: tsPath };
 }
 
 // IPC: Remux .ts to .mp4 using FFmpeg WASM in renderer

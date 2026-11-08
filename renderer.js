@@ -44,16 +44,36 @@ const STREAM_EMBEDS = ['play.xpass.top', 'vidcore.net', 'vidlink.pro', 'vidfast.
 const STORAGE_KEYS = { sources: 'vs_sources', downloads: 'vs_downloads', cacheEnabled: 'vs_cache_enabled' };
 
 let _ffmpegInstance = null;
+let _ffmpegLoadPromise = null;
+
+// FFmpeg WASM 0.12.x API: load(), writeFile(), exec(args), readFile(), deleteFile().
+async function getFFmpeg() {
+  const FFmpegCtor = window.FFmpegWASM && window.FFmpegWASM.FFmpeg;
+  if (typeof FFmpegCtor !== 'function') throw new Error('FFmpeg WASM is not available');
+  if (_ffmpegInstance && _ffmpegInstance.loaded) return _ffmpegInstance;
+  if (!_ffmpegLoadPromise) {
+    _ffmpegInstance = new FFmpegCtor();
+    _ffmpegLoadPromise = _ffmpegInstance.load({
+      coreURL: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js',
+      wasmURL: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.wasm'
+    }).catch((e) => {
+      _ffmpegInstance = null;
+      _ffmpegLoadPromise = null;
+      throw e;
+    });
+  }
+  await _ffmpegLoadPromise;
+  return _ffmpegInstance;
+}
 
 async function remuxTsToMp4(tsData, onProgress) {
-  const { createFFmpeg } = FFmpeg;
-  if (!_ffmpegInstance) {
-    _ffmpegInstance = createFFmpeg({ log: false });
-    await _ffmpegInstance.load();
-  }
-  if (typeof onProgress === 'function') {
-    _ffmpegInstance.setProgress(({ ratio }) => { onProgress(Math.min(Math.round(ratio * 100), 100)); });
-  }
+  const ffmpeg = await getFFmpeg();
+  const progressHandler = ({ progress }) => {
+    if (typeof onProgress === 'function') {
+      onProgress(Math.min(Math.round((progress || 0) * 100), 100));
+    }
+  };
+  ffmpeg.on('progress', progressHandler);
   let inputData;
   if (tsData instanceof Uint8Array) {
     inputData = tsData;
@@ -67,37 +87,37 @@ async function remuxTsToMp4(tsData, onProgress) {
   } else {
     inputData = new Uint8Array(tsData);
   }
-  _ffmpegInstance.FS('writeFile', 'input.ts', inputData);
-  await _ffmpegInstance.run('-fflags', '+igndts', '-i', 'input.ts', '-c', 'copy', '-bsf:a', 'aac_adtstoasc', 'output.mp4');
-  const data = _ffmpegInstance.FS('readFile', 'output.mp4');
-  _ffmpegInstance.FS('unlink', 'input.ts');
-  _ffmpegInstance.FS('unlink', 'output.mp4');
-  return new Blob([data.buffer], { type: 'video/mp4' });
+  try {
+    await ffmpeg.writeFile('input.ts', inputData);
+    await ffmpeg.exec(['-fflags', '+igndts', '-i', 'input.ts', '-c', 'copy', '-bsf:a', 'aac_adtstoasc', 'output.mp4']);
+    const data = await ffmpeg.readFile('output.mp4');
+    return new Blob([data], { type: 'video/mp4' });
+  } finally {
+    ffmpeg.off('progress', progressHandler);
+    try { await ffmpeg.deleteFile('input.ts'); } catch {}
+    try { await ffmpeg.deleteFile('output.mp4'); } catch {}
+  }
 }
 
 // Mux separate fragmented-MP4 video and audio tracks into one MP4.
 async function muxAvToMp4(videoData, audioData) {
-  const { createFFmpeg } = FFmpeg;
-  if (!_ffmpegInstance) {
-    _ffmpegInstance = createFFmpeg({ log: false });
-    await _ffmpegInstance.load();
-  }
-  _ffmpegInstance.FS('writeFile', 'video.mp4', videoData);
-  _ffmpegInstance.FS('writeFile', 'audio.mp4', audioData);
+  const ffmpeg = await getFFmpeg();
   try {
-    await _ffmpegInstance.run(
+    await ffmpeg.writeFile('video.mp4', videoData);
+    await ffmpeg.writeFile('audio.mp4', audioData);
+    await ffmpeg.exec([
       '-fflags', '+genpts',
       '-i', 'video.mp4',
       '-i', 'audio.mp4',
       '-map', '0:v:0', '-map', '1:a:0',
       '-c', 'copy', '-movflags', '+faststart',
       'output.mp4'
-    );
-    const data = _ffmpegInstance.FS('readFile', 'output.mp4');
-    return new Blob([data.buffer], { type: 'video/mp4' });
+    ]);
+    const data = await ffmpeg.readFile('output.mp4');
+    return new Blob([data], { type: 'video/mp4' });
   } finally {
     for (const f of ['video.mp4', 'audio.mp4', 'output.mp4']) {
-      try { _ffmpegInstance.FS('unlink', f); } catch {}
+      try { await ffmpeg.deleteFile(f); } catch {}
     }
   }
 }
@@ -125,11 +145,11 @@ function createVirtualGrid(container, opts = {}) {
     div.style.flexShrink = '0';
     div.style.flexGrow = '0';
     div.innerHTML =
-      '<div class="card-poster"><img src="' + img + '" alt="' + (it.title||'') + '" loading="lazy" referrerpolicy="no-referrer">' +
+      '<div class="card-poster"><img src="' + escapeHtml(img) + '" alt="' + escapeHtml(it.title||'') + '" loading="lazy" referrerpolicy="no-referrer">' +
         '<div class="card-poster-overlay"><div class="card-play"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg></div></div>' +
       '</div>' +
-      '<div class="card-title">' + (it.title||'Unknown') + '</div>' +
-      '<div class="card-meta">' + (it.year||'') + (it.quality ? ' &middot; ' + it.quality : '') + '</div>';
+      '<div class="card-title">' + escapeHtml(it.title||'Unknown') + '</div>' +
+      '<div class="card-meta">' + escapeHtml(it.year||'') + (it.quality ? ' &middot; ' + escapeHtml(it.quality) : '') + '</div>';
     return div;
   }
 
@@ -368,15 +388,15 @@ function createCard(item) {
   const img = item.image || 'https://via.placeholder.com/300x450?text=No+Image';
   d.innerHTML = `
     <div class="card-poster">
-      <img src="${img}" alt="${item.title}" loading="lazy" referrerpolicy="no-referrer">
+      <img src="${escapeHtml(img)}" alt="${escapeHtml(item.title)}" loading="lazy" referrerpolicy="no-referrer">
       <div class="card-poster-overlay">
         <div class="card-play">
           <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
         </div>
       </div>
     </div>
-    <div class="card-title">${item.title||'Unknown'}</div>
-    <div class="card-meta">${item.year||''} ${item.quality?' · '+item.quality:''}</div>`;
+    <div class="card-title">${escapeHtml(item.title||'Unknown')}</div>
+    <div class="card-meta">${escapeHtml(item.year||'')} ${item.quality?' · '+escapeHtml(item.quality):''}</div>`;
   d.addEventListener('click', () => openDetail(item));
   return d;
 }
@@ -405,32 +425,46 @@ function renderContentRow(container, items, title, id) {
   $(`.scroll-arrow.right`, row).addEventListener('click', () => scroll.scrollBy({ left: 400, behavior: 'smooth' }));
 }
 
-async function fetchSourceItems(source, query, section) {
-  try {
-    const config = {
-      containerSelector: source.containerSelector,
-      titleSelector: source.titleSelector,
-      yearSelector: source.yearSelector,
-      imageSelector: source.imageSelector,
-      linkSelector: source.linkSelector,
-      qualitySelector: source.qualitySelector,
-      descSelector: source.descSelector
-    };
-    if (query) config.searchQuery = query;
-    if (section) config.section = section;
+// Cache scrape results so switching sections/searching again is instant.
+const _scrapeCache = new Map(); // key -> { expires, promise }
+const SCRAPE_CACHE_TTL = 5 * 60 * 1000;
 
-    let url;
-    if (query) {
-      url = source.searchUrl.replace('{query}', encodeURIComponent(query));
-    } else {
-      url = source.latestUrl;
-    }
-    const r = await window.api.scrapeUrl(url, config);
-    if (r.success && r.items) {
-      return r.items.map(it => ({ ...it, source: source.name, baseUrl: source.baseUrl }));
-    }
-  } catch (e) { console.error(`Failed fetching ${source.name}:`, e); }
-  return [];
+async function fetchSourceItems(source, query, section) {
+  const key = `${source.name}|${source.baseUrl}|${query || ''}|${section || ''}`;
+  const now = Date.now();
+  const hit = _scrapeCache.get(key);
+  if (hit && hit.expires > now) return hit.promise;
+
+  const promise = (async () => {
+    try {
+      const config = {
+        containerSelector: source.containerSelector,
+        titleSelector: source.titleSelector,
+        yearSelector: source.yearSelector,
+        imageSelector: source.imageSelector,
+        linkSelector: source.linkSelector,
+        qualitySelector: source.qualitySelector,
+        descSelector: source.descSelector
+      };
+      if (query) config.searchQuery = query;
+      if (section) config.section = section;
+
+      let url;
+      if (query) {
+        url = source.searchUrl.replace('{query}', encodeURIComponent(query));
+      } else {
+        url = source.latestUrl;
+      }
+      const r = await window.api.scrapeUrl(url, config);
+      if (r.success && r.items) {
+        return r.items.map(it => ({ ...it, source: source.name, baseUrl: source.baseUrl }));
+      }
+    } catch (e) { console.error(`Failed fetching ${source.name}:`, e); }
+    return [];
+  })();
+
+  _scrapeCache.set(key, { expires: now + SCRAPE_CACHE_TTL, promise });
+  return promise;
 }
 
 async function loadHome() {
@@ -479,6 +513,7 @@ async function loadHome() {
   const dedupedAnime = deduplicateItems(animeItems);
   if (dedupedAnime.length && animeRow) dedupedAnime.slice(0, 15).forEach(it => animeRow.appendChild(createCard(it)));
   prismPulse();
+  if (typeof window.__hideSplash === 'function') window.__hideSplash();
 }
 
 function renderHero() {
@@ -491,8 +526,8 @@ function renderHero() {
   if (pills) {
     const type = item.isTv ? 'TV' : item.mediaType === 'tv' ? 'TV' : 'MOVIE';
     pills.innerHTML = `<span class="hero-pill">${type}</span>
-      ${item.year?`<span class="hero-pill">${item.year}</span>`:''}
-      ${item.quality?`<span class="hero-pill rating">${item.quality}</span>`:''}`;
+      ${item.year?`<span class="hero-pill">${escapeHtml(item.year)}</span>`:''}
+      ${item.quality?`<span class="hero-pill rating">${escapeHtml(item.quality)}</span>`:''}`;
   }
   const title = $('#hero-title');
   if (title) title.textContent = item.title || '';
@@ -552,6 +587,7 @@ async function loadSectionGrid(section) {
 
 let _lastSearchResults = [];
 let _searchVirtualGrid = null;
+let _searchSeq = 0;
 
 // Human-friendly source labels: "Movie Source 1", "Anime Source 2", ...
 // These are display-only; source names are still used for lookups.
@@ -580,16 +616,14 @@ function populateSourceFilter() {
   const sel = $('#filter-source-select');
   if (!sel) return;
   sel.innerHTML = '<option value="all">All Sources</option>' +
-    state.sources.map(s => `<option value="${s.name}">${sourceDisplayName(s)}</option>`).join('');
+    state.sources.map(s => `<option value="${escapeHtml(s.name)}">${escapeHtml(sourceDisplayName(s))}</option>`).join('');
 }
 
-function renderSearchGrid(items, filter) {
+function renderSearchGrid(items) {
   const gridEl = $('#search-grid');
   const countEl = $('#search-result-count');
   if (!gridEl) return;
-  const filtered = (filter && filter !== 'all')
-    ? items.filter(it => it.source === filter || (it._allLinks && it._allLinks.some(l => l.source === filter)))
-    : items;
+  const filtered = items || [];
   if (countEl) countEl.textContent = `${filtered.length} results`;
 
   if (!_searchVirtualGrid) {
@@ -604,14 +638,13 @@ function renderSearchGrid(items, filter) {
 }
 
 async function performSearch(query) {
+  const seq = ++_searchSeq;
   const loadingEl = $('#search-loading');
   const noResEl = $('#search-no-results');
   const contentEl = $('#search-results-content');
   const queryDisp = $('#search-query-display');
-  const sourceSelect = $('#filter-source-select');
 
   _lastSearchResults = [];
-  if (sourceSelect) sourceSelect.value = 'all';
 
   if (!query || query.trim().length < 2) {
     if (loadingEl) loadingEl.classList.add('hidden');
@@ -633,23 +666,15 @@ async function performSearch(query) {
     allItems.push(...items);
   }));
 
+  // A newer search started while this one was in flight — drop stale results.
+  if (seq !== _searchSeq) return;
+
   if (loadingEl) loadingEl.classList.add('hidden');
   _lastSearchResults = deduplicateItems(allItems);
   if (!_lastSearchResults.length) { if (noResEl) noResEl.classList.remove('hidden'); return; }
   if (contentEl) contentEl.classList.remove('hidden');
 
-  // Populate source filter dropdown
-  if (sourceSelect) {
-    const allSourceNames = new Set();
-    _lastSearchResults.forEach(it => {
-      if (it.source) allSourceNames.add(it.source);
-      if (it._allLinks) it._allLinks.forEach(l => { if (l.source) allSourceNames.add(l.source); });
-    });
-    sourceSelect.innerHTML = '<option value="all">All Sources</option>' +
-      [...allSourceNames].map(s => `<option value="${s}">${s}</option>`).join('');
-  }
-
-  renderSearchGrid(_lastSearchResults, sourceSelect ? sourceSelect.value : 'all');
+  renderSearchGrid(_lastSearchResults);
 }
 
 async function openDetail(movie) {
@@ -703,7 +728,7 @@ async function openDetail(movie) {
   if (chipsEl) {
     // Cheap: fetch (already-settled by startup) health statuses for dots.
     chipsEl.innerHTML = state.sources.map(s =>
-      `<button class="source-chip ${s.name===source.name?'active':''}" data-source="${s.name}"><span class="src-dot dot-${healthDotClass(s.name)}"></span>${sourceDisplayName(s)}</button>`
+      `<button class="source-chip ${s.name===source.name?'active':''}" data-source="${escapeHtml(s.name)}"><span class="src-dot dot-${healthDotClass(s.name)}"></span>${escapeHtml(sourceDisplayName(s))}</button>`
     ).join('');
     $$('.source-chip', chipsEl).forEach(c => c.addEventListener('click', () => switchSource(c.dataset.source, movie)));
   }
@@ -769,8 +794,8 @@ function renderDetailInfo(movie, detail, source) {
       castSection.classList.remove('hidden');
       castList.innerHTML = detail.cast.map(c => `
         <div class="cast-member">
-          <div class="cast-avatar"><img src="${c.image||'https://via.placeholder.com/64?text=?'}" alt="${c.name||''}" loading="lazy"></div>
-          <div class="cast-name">${c.name||''}</div>
+          <div class="cast-avatar"><img src="${escapeHtml(c.image||'https://via.placeholder.com/64?text=?')}" alt="${escapeHtml(c.name||'')}" loading="lazy"></div>
+          <div class="cast-name">${escapeHtml(c.name||'')}</div>
         </div>`).join('');
     }
   }
@@ -786,7 +811,6 @@ function renderDetailInfo(movie, detail, source) {
         const link = it.link || (it.tmdbId && movie.baseUrl && it.mediaType ? `${movie.baseUrl}/${it.mediaType}/${it.tmdbId}` : '');
         if (!link) return;
         const card = createCard({ ...it, source: movie.source, baseUrl: movie.baseUrl, link });
-        card.addEventListener('click', () => openDetail({ ...it, source: movie.source, baseUrl: movie.baseUrl, link }));
         relGrid.appendChild(card);
       });
     } else {
@@ -890,7 +914,7 @@ function renderSeasons(seasons, episodesData, movie) {
     }
   }
   listEl.innerHTML = seasonKeys.map((key, i) =>
-    `<button class="source-chip ${key===_activeSeasonKey?'active':''}" data-season="${key}">${key}</button>`
+    `<button class="source-chip ${key===_activeSeasonKey?'active':''}" data-season="${escapeHtml(key)}">${escapeHtml(key)}</button>`
   ).join('');
   const getSeasonNum = (key) => {
     const m = String(key || '').match(/\d+/);
@@ -913,22 +937,25 @@ function renderEpisodes(episodes, container, movie, seasonNum) {
   }
   container.innerHTML = episodes.map(ep => {
     const epNum = ep.number || ep.epNum || '?';
-    const epTitle = (ep.title || ep.name || 'Untitled').replace(/"/g, '&quot;');
+    const epTitle = ep.title || ep.name || 'Untitled';
     const thumb = ep.thumbnail || '';
-    const link = (ep.link || '').replace(/"/g, '&quot;');
-    const thumbBg = thumb ? `background-image:url('${thumb.replace(/'/g, '%27')}')` : '';
+    const link = ep.link || '';
+    const thumbImg = thumb
+      ? `<img class="episode-thumb-img" src="${escapeHtml(thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer" style="width:100%;height:100%;object-fit:cover">`
+      : '';
     return `
-    <div class="episode-card" data-link="${link}" data-title="${epTitle}" data-ep-num="${epNum}" data-season="${seasonNum}">
-      <div class="episode-thumb" ${thumbBg ? `style="${thumbBg};background-size:cover;background-position:center"` : ''}>
+    <div class="episode-card" data-link="${escapeHtml(link)}" data-title="${escapeHtml(epTitle)}" data-ep-num="${escapeHtml(epNum)}" data-season="${escapeHtml(seasonNum)}">
+      <div class="episode-thumb">
+        ${thumbImg}
         <div class="episode-play"><div class="episode-play-circle">
           <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
         </div></div>
       </div>
       <div class="episode-info">
-        <div class="episode-number">E${epNum}</div>
-        <div class="episode-title">${epTitle}</div>
-        <button class="episode-dl-btn" data-ep-link="${link}" data-ep-title="${epTitle}" data-ep-num="${epNum}" data-season="${seasonNum}">Download</button>
-        <div class="episode-quality-picker hidden" data-ep-num="${epNum}"></div>
+        <div class="episode-number">E${escapeHtml(epNum)}</div>
+        <div class="episode-title">${escapeHtml(epTitle)}</div>
+        <button class="episode-dl-btn" data-ep-link="${escapeHtml(link)}" data-ep-title="${escapeHtml(epTitle)}" data-ep-num="${escapeHtml(epNum)}" data-season="${escapeHtml(seasonNum)}">Download</button>
+        <div class="episode-quality-picker hidden" data-ep-num="${escapeHtml(epNum)}"></div>
       </div>
     </div>`;
   }).join('');
@@ -997,7 +1024,7 @@ function renderEpisodes(episodes, container, movie, seasonNum) {
       picker.innerHTML = qualities.map(q => {
         const qlabel = formatQualityLabel(q);
         const size = q.estimatedSize && q.estimatedSize !== 'Unknown' ? ' · ' + q.estimatedSize : '';
-        return `<button class="quality-chip" data-url="${q.url}">${qlabel}${size}</button>`;
+        return `<button class="quality-chip" data-url="${escapeHtml(q.url)}">${escapeHtml(qlabel)}${escapeHtml(size)}</button>`;
       }).join('');
       picker.classList.remove('hidden');
       btn.classList.add('hidden');
@@ -1065,7 +1092,7 @@ function renderDownloadsList(downloads, movie) {
   container.innerHTML = rows.map((d, i) => `
     <div class="download-item">
       <div class="download-info">
-        <div class="download-title">${d.quality||'Unknown'}${d.size?' · '+d.size:''}</div>
+        <div class="download-title">${escapeHtml(d.quality||'Unknown')}${d.size?' · '+escapeHtml(d.size):''}</div>
       </div>
       <div class="download-actions">
         <button class="download-btn primary play-dl-btn" data-idx="${i}">Play</button>
@@ -1120,7 +1147,7 @@ function renderDownloadsList(downloads, movie) {
       picker.innerHTML = qualities.map(q => {
         const qualityLabel = formatQualityLabel(q);
         const sizeLabel = q.estimatedSize && q.estimatedSize !== 'Unknown' ? ' · ' + q.estimatedSize : '';
-        return `<button class="quality-chip" data-url="${q.url}">${qualityLabel}${sizeLabel}</button>`;
+        return `<button class="quality-chip" data-url="${escapeHtml(q.url)}">${escapeHtml(qualityLabel)}${escapeHtml(sizeLabel)}</button>`;
       }).join('');
       picker.classList.remove('hidden');
       btn.classList.add('hidden');
@@ -1281,7 +1308,7 @@ function initCustomControls() {
       const track = document.createElement('track');
       track.kind = 'subtitles';
       track.label = sub.label || 'Subtitles';
-      track.srclang = 'en';
+      track.srclang = subtitleLangCode(sub.lang, sub.language, sub.srclang, sub.label);
       track.default = true;
       track.src = url;
       track._blobUrl = url;
@@ -1314,7 +1341,7 @@ function initCustomControls() {
     items.push(`<button class="subs-menu-item${tracks.every(t => t.mode !== 'showing') ? ' active' : ''}" data-track="off">Off</button>`);
     tracks.forEach((t, i) => {
       const label = t.label || t.language || ('Subtitle ' + (i + 1));
-      items.push(`<button class="subs-menu-item${t.mode === 'showing' ? ' active' : ''}" data-track="${i}">${label}</button>`);
+      items.push(`<button class="subs-menu-item${t.mode === 'showing' ? ' active' : ''}" data-track="${i}">${escapeHtml(label)}</button>`);
     });
     items.push('<div class="subs-menu-divider"></div>');
     items.push('<button class="subs-menu-item" data-track="load">Load subtitle file…</button>');
@@ -1364,7 +1391,7 @@ function initCustomControls() {
             const track = document.createElement('track');
             track.kind = 'subtitles';
             track.label = res.name || 'Loaded subtitles';
-            track.srclang = 'en';
+            track.srclang = subtitleLangCode(res.lang, res.language, res.name);
             track.default = true;
             track.src = url;
             track._blobUrl = url;
@@ -1436,15 +1463,8 @@ function initCustomControls() {
     const container = document.getElementById('modal-video-container');
     if (!container || container.classList.contains('hidden')) return;
     if (e.key === ' ') { e.preventDefault(); togglePlay(); }
-    if (e.key === 'Escape') {
-      destroyPlayer();
-      container.classList.add('hidden');
-      const closeBtn = $('#modal-video-close');
-      if (closeBtn) closeBtn.style.display = 'none';
-      const lo = $('#video-loading-overlay');
-      if (lo) lo.classList.add('hidden');
-      setVideoTitle('');
-    }
+    // Escape is handled by the single global handler in initEventListeners(),
+    // which closes the player via popNav() without also navigating back.
   });
 }
 
@@ -1832,37 +1852,29 @@ function renderContinueWatching() {
   section.classList.remove('hidden');
   row.innerHTML = '';
   for (const entry of items) {
-    const card = createCard({
+    const source = state.sources.find(s => s.active && !s.isKawaiiAnime && !s.isAnimeSource) || { baseUrl: 'https://streamex.sh', name: '' };
+    const detailItem = {
       title: entry.title,
       image: entry.image,
+      backdrop: entry.backdrop || entry.image,
       year: entry.year || '',
       quality: '',
       tmdbId: entry.tmdbId,
       mediaType: entry.type,
+      type: entry.type,
       isTv: entry.type === 'tv',
-      link: ''
-    });
-    card.addEventListener('click', () => {
-      openDetail({
-        title: entry.title,
-        image: entry.image,
-        backdrop: entry.backdrop || entry.image,
-        year: entry.year || '',
-        tmdbId: entry.tmdbId,
-        mediaType: entry.type,
-        type: entry.type,
-        isTv: entry.type === 'tv',
-        link: `${state.sources.find(s => s.active && !s.isKawaiiAnime && !s.isAnimeSource)?.baseUrl || 'https://streamex.sh'}/${entry.type === 'tv' ? 'tv' : 'movie'}/${entry.tmdbId}`,
-        baseUrl: state.sources.find(s => s.active && !s.isKawaiiAnime && !s.isAnimeSource)?.baseUrl || 'https://streamex.sh',
-        source: (state.sources.find(s => s.active && !s.isKawaiiAnime && !s.isAnimeSource) || {}).name || '',
-        description: '',
-        _resumeAt: entry.at
-      });
-    });
+      link: `${source.baseUrl}/${entry.type === 'tv' ? 'tv' : 'movie'}/${entry.tmdbId}`,
+      baseUrl: source.baseUrl,
+      source: source.name || '',
+      description: '',
+      _resumeAt: entry.at
+    };
+    // createCard() already wires the click to openDetail(detailItem).
+    const card = createCard(detailItem);
     const pct = entry.dur > 0 ? Math.min(100, Math.round((entry.at / entry.dur) * 100)) : 0;
     const bar = document.createElement('div');
     bar.className = 'cw-progress';
-    bar.innerHTML = `<div class="cw-progress-fill" style="width:${pct}%"></div>`;
+    bar.innerHTML = `<div class="cw-progress-fill" style="width:${Math.max(0, Math.min(100, pct))}%"></div>`;
     card.appendChild(bar);
     card.title = `Resume at ${Math.max(1, Math.floor(entry.at / 60))} min`;
     row.appendChild(card);
@@ -2019,7 +2031,7 @@ function showQualityPicker(qualities, title, loadingOverlay) {
 
   pickerList.innerHTML = qualities.map((q, i) => {
     const size = q.estimatedSize && q.estimatedSize !== 'Unknown' ? q.estimatedSize : '';
-    return `<button class="quality-pick-btn" data-idx="${i}"><span>${formatQualityLabel(q)}</span>${size ? `<span class="qp-size">${size}</span>` : ''}</button>`;
+    return `<button class="quality-pick-btn" data-idx="${i}"><span>${escapeHtml(formatQualityLabel(q))}</span>${size ? `<span class="qp-size">${escapeHtml(size)}</span>` : ''}</button>`;
   }).join('');
 
   pickerOverlay.classList.remove('hidden');
@@ -2164,7 +2176,7 @@ function renderActiveDownloads() {
     const totalSize = d.total && d.total > 0 ? formatBytes(d.total) : '';
     const isPaused = d.paused;
     return `
-      <div class="active-dl-item${isPaused ? ' is-paused' : ''}" data-id="${d.id}">
+      <div class="active-dl-item${isPaused ? ' is-paused' : ''}" data-id="${escapeHtml(d.id)}">
         <div class="active-dl-icon${isPaused ? ' paused' : ''}">
           ${isPaused ? `<svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20"><polygon points="5 3 19 12 5 21 5 3"/></svg>` :
           `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="20" height="20">
@@ -2175,11 +2187,11 @@ function renderActiveDownloads() {
         </div>
         <div class="active-dl-info">
           <div class="active-dl-top">
-            <span class="active-dl-title">${d.title}</span>
+            <span class="active-dl-title">${escapeHtml(d.title)}</span>
             <span class="active-dl-pct">${isPaused ? 'Paused' : pct + '%'}</span>
           </div>
           <div class="active-dl-bar">
-            <div class="active-dl-bar-fill${isPaused ? ' paused' : ''}" style="width:${pct}%"></div>
+            <div class="active-dl-bar-fill${isPaused ? ' paused' : ''}" style="width:${Math.max(0, Math.min(100, Number(pct) || 0))}%"></div>
           </div>
           <div class="active-dl-bottom">
             <span class="active-dl-speed">${speed}</span>
@@ -2187,14 +2199,14 @@ function renderActiveDownloads() {
           </div>
         </div>
         <div class="active-dl-btns">
-          <button class="active-dl-btn dl-pause-play" data-id="${d.id}" title="${isPaused ? 'Resume' : 'Pause'}">
+          <button class="active-dl-btn dl-pause-play" data-id="${escapeHtml(d.id)}" title="${isPaused ? 'Resume' : 'Pause'}">
             ${isPaused ?
               `<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="5 3 19 12 5 21 5 3"/></svg>` :
               `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="14" height="14">
                 <rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>
               </svg>`}
           </button>
-          <button class="active-dl-btn dl-cancel" data-id="${d.id}" title="Cancel">
+          <button class="active-dl-btn dl-cancel" data-id="${escapeHtml(d.id)}" title="Cancel">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="14" height="14">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
             </svg>
@@ -2247,14 +2259,14 @@ function renderCompletedDownloads() {
   listEl.innerHTML = saved.map((d, i) => `
     <div class="saved-dl-item">
       <div class="saved-dl-poster">
-        ${d.image ? `<img src="${d.image}" alt="${d.title}" loading="lazy">` : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="20" height="20"><polyline points="20 6 9 17 4 12"/></svg>`}
+        ${d.image ? `<img src="${escapeHtml(d.image)}" alt="${escapeHtml(d.title)}" loading="lazy">` : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="20" height="20"><polyline points="20 6 9 17 4 12"/></svg>`}
       </div>
       <div class="saved-dl-info">
-        <div class="saved-dl-title">${d.title}</div>
-        <div class="saved-dl-meta">${d.quality||''} ${d.path ? '· ' + d.path.split(/[/\\]/).pop() : ''}</div>
+        <div class="saved-dl-title">${escapeHtml(d.title)}</div>
+        <div class="saved-dl-meta">${escapeHtml(d.quality||'')} ${d.path ? '· ' + escapeHtml(d.path.split(/[/\\]/).pop()) : ''}</div>
       </div>
       <div class="saved-dl-actions">
-        <button class="download-btn primary play-saved" data-path="${d.path}">Play</button>
+        <button class="download-btn primary play-saved" data-path="${escapeHtml(d.path)}">Play</button>
         <button class="download-btn secondary remove-saved" data-idx="${i}">Remove</button>
       </div>
     </div>`).join('');
@@ -2276,6 +2288,38 @@ function escapeHtml(str) {
   return String(str ?? '').replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   }[c]));
+}
+
+// Pick a BCP-47-ish language code for <track srclang>. Subtitle APIs expose
+// language codes inconsistently, so accept a code or a human-readable label.
+function subtitleLangCode(...values) {
+  for (const v of values) {
+    const s = String(v || '').trim().toLowerCase();
+    if (/^[a-z]{2,3}(-[a-z]{2,4})?$/.test(s)) return s;
+  }
+  const text = values.filter(Boolean).join(' ').toLowerCase();
+  const pairs = [
+    ['arabic', 'ar'], ['العربية', 'ar'],
+    ['hindi', 'hi'], ['हिन्दी', 'hi'],
+    ['spanish', 'es'], ['español', 'es'],
+    ['french', 'fr'], ['français', 'fr'],
+    ['german', 'de'], ['deutsch', 'de'],
+    ['portuguese', 'pt'], ['português', 'pt'],
+    ['russian', 'ru'], ['русский', 'ru'],
+    ['japanese', 'ja'], ['日本語', 'ja'],
+    ['korean', 'ko'], ['한국어', 'ko'],
+    ['chinese', 'zh'], ['中文', 'zh'],
+    ['italian', 'it'], ['italiano', 'it'],
+    ['turkish', 'tr'], ['türkçe', 'tr'],
+    ['indonesian', 'id'], ['malay', 'ms'],
+    ['thai', 'th'], ['vietnamese', 'vi'],
+    ['polish', 'pl'], ['dutch', 'nl'],
+    ['english', 'en']
+  ];
+  for (const [needle, code] of pairs) {
+    if (text.includes(needle)) return code;
+  }
+  return 'en';
 }
 
 async function loadCachedDownloads() {
@@ -2324,7 +2368,7 @@ function renderCachedDownloads() {
 
   if (cacheListEl) {
     cacheListEl.innerHTML = state.activeCaches.map(c => `
-      <div class="saved-dl-item" data-cid="${c.cacheId}">
+      <div class="saved-dl-item" data-cid="${escapeHtml(c.cacheId)}">
         <div class="saved-dl-poster">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="20" height="20"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
         </div>
@@ -2334,7 +2378,7 @@ function renderCachedDownloads() {
           <div class="cache-progress-track"><div class="cache-progress-fill" style="width:${Math.min(c.percent || 0, 100)}%"></div></div>
         </div>
         <div class="saved-dl-actions">
-          <button class="download-btn danger cancel-cache" data-cid="${c.cacheId}">Cancel</button>
+          <button class="download-btn danger cancel-cache" data-cid="${escapeHtml(c.cacheId)}">Cancel</button>
         </div>
       </div>`).join('');
 
@@ -2501,6 +2545,11 @@ function initDownloadListeners() {
           path: data.path || data.filePath || ''
         });
         saveSavedDownloads();
+        if (data.warning) showToast(data.warning);
+      } else if (data.state === 'cancelled') {
+        showToast('Download cancelled');
+      } else if (data.state === 'interrupted') {
+        showToast('Download interrupted');
       }
       renderDownloads();
     }
@@ -2571,14 +2620,12 @@ function initEventListeners() {
     const q = $('#search-input');
     if (q) { hideSuggestions(); performSearch(q.value); }
   });
-  const filterSourceSelect = $('#filter-source-select');
-  if (filterSourceSelect) filterSourceSelect.addEventListener('change', () => {
-    renderSearchGrid(_lastSearchResults, filterSourceSelect.value);
-  });
+
   const searchInput = $('#search-input');
   const suggestionsBox = $('#search-suggestions');
   const searchSection = $('#search-section');
   let suggestionTimer = null;
+  let suggestionSeq = 0;
   function positionSuggestions() {
     const form = $('#search-form');
     if (!form || !searchSection || !suggestionsBox) return;
@@ -2592,21 +2639,23 @@ function initEventListeners() {
     searchInput.addEventListener('input', () => {
       clearTimeout(suggestionTimer);
       const val = searchInput.value.trim();
-      if (val.length < 2) { suggestionsBox.classList.add('hidden'); return; }
+      if (val.length < 2) { suggestionSeq++; suggestionsBox.classList.add('hidden'); return; }
       suggestionTimer = setTimeout(async () => {
+        const seq = ++suggestionSeq;
         const activeSources = state.sources.filter(s => s.active);
         const allItems = [];
         await Promise.all(activeSources.map(async src => {
           const items = await fetchSourceItems(src, val);
           allItems.push(...items);
         }));
+        if (seq !== suggestionSeq) return;
         const deduped = deduplicateItems(allItems).slice(0, 8);
         suggestionsBox.innerHTML = '';
         if (!deduped.length) { suggestionsBox.classList.add('hidden'); return; }
         deduped.forEach(it => {
           const item = document.createElement('div');
           item.className = 'search-suggestion-item';
-          item.innerHTML = `<img src="${it.image || 'https://via.placeholder.com/36x54?text=No+Image'}" alt="" loading="lazy" referrerpolicy="no-referrer"><span class="suggestion-title">${it.title || ''}</span><span class="suggestion-year">${it.year || ''}</span>`;
+          item.innerHTML = `<img src="${escapeHtml(it.image || 'https://via.placeholder.com/36x54?text=No+Image')}" alt="" loading="lazy" referrerpolicy="no-referrer"><span class="suggestion-title">${escapeHtml(it.title || '')}</span><span class="suggestion-year">${escapeHtml(it.year || '')}</span>`;
           item.addEventListener('click', () => { suggestionsBox.classList.add('hidden'); openDetail({ ...it, source: it._source || it.source, baseUrl: it._baseUrl || it.baseUrl }); });
           suggestionsBox.appendChild(item);
         });

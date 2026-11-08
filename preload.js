@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('api', {
   analyzeStream:      (url, quick)   => ipcRenderer.invoke('analyze-stream', { url, quick }),
   readFile:           (filePath)    => ipcRenderer.invoke('read-file', { filePath }),
   writeFile:          (filePath, data) => ipcRenderer.invoke('write-file', { filePath, data }),
+  readFileBinary:     (filePath)    => ipcRenderer.invoke('read-file-binary', { filePath }),
+  writeFileBinary:    (filePath, data) => ipcRenderer.invoke('write-file-binary', { filePath, data }),
   remuxTsToMp4:       (tsPath, mp4Path, downloadId) => ipcRenderer.invoke('remux-ts-to-mp4', { tsPath, mp4Path, downloadId }),
   onDownloadStarted:  (cb) => ipcRenderer.on('download-started',  (e, d) => cb(d)),
   onDownloadProgress: (cb) => ipcRenderer.on('download-progress', (e, d) => cb(d)),

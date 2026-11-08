@@ -24,6 +24,34 @@ const TMDB_GENRES = {
 
 const TMDB_LANG = 'en-US';
 
+// ─── Small TTL cache ──────────────────────────────────────────────────────
+// Every TMDB-based source hits the same endpoints, and every anime source hits
+// the same AniList API. Deduplicating those requests cuts startup time a lot.
+const API_CACHE_TTL = 5 * 60 * 1000;
+const apiCache = new Map(); // key -> { expires, promise }
+
+function cached(key, fn, ttl = API_CACHE_TTL) {
+  const now = Date.now();
+  const hit = apiCache.get(key);
+  if (hit && hit.expires > now) return hit.promise;
+  const promise = fn().catch((err) => {
+    // Never cache failures.
+    const current = apiCache.get(key);
+    if (current && current.promise === promise) apiCache.delete(key);
+    throw err;
+  });
+  apiCache.set(key, { expires: now + ttl, promise });
+  return promise;
+}
+
+async function anilistQuery(query, variables) {
+  const key = 'anilist:' + JSON.stringify({ query, variables: variables || null });
+  return cached(key, async () => {
+    const res = await axios.post('https://graphql.anilist.co', { query, variables }, { timeout: 10000 });
+    return res.data;
+  });
+}
+
 // TMDB-based source domains (listing/detail handled via TMDB API)
 const TMDB_SOURCE_DOMAINS = ['streamex.sh', 'moviepire.org', 'www.rivestream.app', '7reels.cc', 'abibli.com', 'peestream.in'];
 
@@ -131,8 +159,10 @@ function buildSourceWatchUrl(baseUrl, domain, mediaType, tmdbId, season, episode
 async function tmdbFetch(path, params = {}) {
   const qs = new URLSearchParams({ api_key: TMDB_API_KEY, language: TMDB_LANG, ...params });
   const url = `${TMDB_BASE}${path}?${qs.toString()}`;
-  const res = await axios.get(url, { headers: BROWSER_HEADERS, timeout: 12000 });
-  return res.data;
+  return cached(`tmdb:${url}`, async () => {
+    const res = await axios.get(url, { headers: BROWSER_HEADERS, timeout: 12000 });
+    return res.data;
+  });
 }
 
 /**
@@ -142,13 +172,15 @@ async function tmdbFetch(path, params = {}) {
 async function streamexFetch(path, params = {}) {
   const qs = new URLSearchParams(params);
   const url = `https://streamex.sh/api/tmdb${path}?${qs.toString()}`;
-  try {
-    const res = await axios.get(url, { headers: BROWSER_HEADERS, timeout: 12000 });
-    return res.data;
-  } catch (e) {
-    // Fallback to direct TMDB
-    return tmdbFetch(path, params);
-  }
+  return cached(`streamex:${url}`, async () => {
+    try {
+      const res = await axios.get(url, { headers: BROWSER_HEADERS, timeout: 12000 });
+      return res.data;
+    } catch (e) {
+      // Fallback to direct TMDB
+      return tmdbFetch(path, params);
+    }
+  });
 }
 
 /**
@@ -334,7 +366,8 @@ async function scrapeStreamexDetail(detailUrl) {
   // TV: fetch seasons/episodes grouped by season for GaiaFlix layout
   const episodesData = {};
   try {
-    const tvData = await streamexFetch(`/tv/${tmdbId}`);
+    // `data` already came from /tv/{tmdbId}; reuse it instead of re-fetching.
+    const tvData = (data && Array.isArray(data.seasons)) ? data : await streamexFetch(`/tv/${tmdbId}`);
     const seasonsData = (tvData.seasons || []).filter(s => s.season_number > 0 && s.season_number != null).slice(0, 10);
     seasons = tvData.number_of_seasons || seasons;
 
@@ -1102,8 +1135,8 @@ async function getPoster(detailUrl, config) {
           }
         `;
         const variables = { search: searchQuery, type: 'ANIME' };
-        const res = await axios.post('https://graphql.anilist.co', { query, variables }, { timeout: 10000 });
-        const media = res.data?.data?.Page?.media || [];
+        const res = await anilistQuery(query, variables);
+        const media = res.data?.Page?.media || [];
         return media.map(item => ({
           title: item.title.english || item.title.romaji || 'Unknown',
           link: `https://${KAWAII_ANIME_DOMAIN}/anime/${item.id}`,
@@ -1135,8 +1168,8 @@ async function getPoster(detailUrl, config) {
           }
         }
       `;
-      const res = await axios.post('https://graphql.anilist.co', { query }, { timeout: 10000 });
-      const media = res.data?.data?.Page?.media || [];
+      const res = await anilistQuery(query);
+      const media = res.data?.Page?.media || [];
       return media.map(item => ({
         title: item.title.english || item.title.romaji || 'Unknown',
         link: `https://${KAWAII_ANIME_DOMAIN}/anime/${item.id}`,
@@ -1194,8 +1227,8 @@ async function getPoster(detailUrl, config) {
             }
           }
         `;
-        const res = await axios.post('https://graphql.anilist.co', { query, variables: { id: parseInt(anilistId) } }, { timeout: 10000 });
-        const media = res.data?.data?.Media;
+        const res = await anilistQuery(query, { id: parseInt(anilistId) });
+        const media = res.data?.Media;
         if (media) {
           title = media.title.english || media.title.romaji || '';
           description = (media.description || '').replace(/<[^>]*>/g, '').substring(0, 500);
@@ -1332,8 +1365,8 @@ async function getPoster(detailUrl, config) {
             }
           }
         `;
-        const res = await axios.post('https://graphql.anilist.co', { query, variables: { id: parseInt(anilistId) } }, { timeout: 10000 });
-        const media = res.data?.data?.Media;
+        const res = await anilistQuery(query, { id: parseInt(anilistId) });
+        const media = res.data?.Media;
         if (media) {
           title = media.title.english || media.title.romaji || '';
           description = (media.description || '').replace(/<[^>]*>/g, '').substring(0, 500);

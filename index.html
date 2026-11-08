@@ -1165,9 +1165,6 @@
         <h2 class="section-title">Results for "<span id="search-query-display"></span>"</h2>
       </div>
       <p class="section-subtitle" id="search-result-count"></p>
-      <select id="filter-source-select" class="filter-select">
-        <option value="all">All Sources</option>
-      </select>
     </div>
     <div id="search-loading" class="fullscreen-state hidden">
       <div class="spinner-ring"></div>
@@ -1374,10 +1371,23 @@
 
 <script>
 (function() {
-  setTimeout(() => {
-    const screen = document.getElementById('loading-screen');
-    if (screen) screen.classList.add('fade-out');
-  }, 10000);
+  const started = Date.now();
+  let scheduled = false;
+  window.__hideSplash = function() {
+    if (scheduled) return;
+    scheduled = true;
+    // Keep the branding visible briefly, but never wait the full 10s.
+    const delay = Math.max(0, 1200 - (Date.now() - started));
+    setTimeout(() => {
+      const screen = document.getElementById('loading-screen');
+      if (screen) {
+        screen.classList.add('fade-out');
+        setTimeout(() => { try { screen.remove(); } catch {} }, 700);
+      }
+    }, delay);
+  };
+  // Safety net if the app fails before Home finishes loading.
+  setTimeout(() => window.__hideSplash(), 10000);
 })();
 </script>
 
